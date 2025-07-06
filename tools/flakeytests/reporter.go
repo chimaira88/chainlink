@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -62,7 +63,6 @@ type Context struct {
 type LokiReporter struct {
 	host    string
 	auth    string
-	orgId   string
 	command string
 	now     func() time.Time
 	ctx     Context
@@ -71,7 +71,7 @@ type LokiReporter struct {
 func (l *LokiReporter) createRequest(report *Report) (pushRequest, error) {
 	vs := [][]string{}
 	now := l.now()
-	nows := fmt.Sprintf("%d", now.UnixNano())
+	nows := strconv.FormatInt(now.UnixNano(), 10)
 
 	for pkg, tests := range report.tests {
 		for t := range tests {
@@ -153,10 +153,9 @@ func (l *LokiReporter) makeRequest(ctx context.Context, pushReq pushRequest) err
 	}
 	req.Header.Add(
 		"Authorization",
-		fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString([]byte(l.auth))),
+		"Basic "+base64.StdEncoding.EncodeToString([]byte(l.auth)),
 	)
 	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("X-Scope-OrgID", l.orgId)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -179,6 +178,6 @@ func (l *LokiReporter) Report(ctx context.Context, report *Report) error {
 	return l.makeRequest(ctx, pushReq)
 }
 
-func NewLokiReporter(host, auth, orgId, command string, ctx Context) *LokiReporter {
-	return &LokiReporter{host: host, auth: auth, orgId: orgId, command: command, now: time.Now, ctx: ctx}
+func NewLokiReporter(host, auth, command string, ctx Context) *LokiReporter {
+	return &LokiReporter{host: host, auth: auth, command: command, now: time.Now, ctx: ctx}
 }

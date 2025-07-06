@@ -2,15 +2,17 @@ package wsrpc
 
 import (
 	"context"
+	"math/big"
+	"math/rand/v2"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/csakey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc/cache"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc/mocks"
@@ -56,7 +58,7 @@ func newNoopCacheSet() cache.CacheSet {
 }
 
 func Test_Client_Transmit(t *testing.T) {
-	lggr := logger.TestLogger(t)
+	lggr := logger.Test(t)
 	ctx := testutils.Context(t)
 	req := &pb.TransmitRequest{}
 
@@ -74,7 +76,15 @@ func Test_Client_Transmit(t *testing.T) {
 		conn := &mocks.MockConn{
 			Ready: true,
 		}
-		c := newClient(lggr, csakey.KeyV2{}, nil, "", noopCacheSet)
+		opts := ClientOpts{
+			logger.Sugared(lggr),
+			csakey.MustNewV2XXXTestingOnly(new(big.Int).SetInt64(rand.Int64())),
+			nil,
+			"",
+			noopCacheSet,
+			nil,
+		}
+		c := newClient(opts)
 		c.conn = conn
 		c.rawClient = wsrpcClient
 		require.NoError(t, c.StartOnce("Mock WSRPC Client", func() error { return nil }))
@@ -118,7 +128,7 @@ func Test_Client_Transmit(t *testing.T) {
 }
 
 func Test_Client_LatestReport(t *testing.T) {
-	lggr := logger.TestLogger(t)
+	lggr := logger.Test(t)
 	ctx := testutils.Context(t)
 	cacheReads := 5
 
@@ -134,7 +144,7 @@ func Test_Client_LatestReport(t *testing.T) {
 		},
 		{
 			name:          "with cache enabled",
-			ttl:           1000 * time.Hour, //some large value that will never expire during a test
+			ttl:           1000 * time.Hour, // some large value that will never expire during a test
 			expectedCalls: 1,
 		},
 	}
@@ -159,7 +169,7 @@ func Test_Client_LatestReport(t *testing.T) {
 			conn := &mocks.MockConn{
 				Ready: true,
 			}
-			c := newClient(lggr, csakey.KeyV2{}, nil, "", cacheSet)
+			c := newClient(ClientOpts{logger.Sugared(lggr), csakey.MustNewV2XXXTestingOnly(big.NewInt(rand.Int64())), nil, "", cacheSet, nil})
 			c.conn = conn
 			c.rawClient = wsrpcClient
 

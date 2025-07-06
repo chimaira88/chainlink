@@ -8,19 +8,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
-	evmclimocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
-	lpmocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/functions/generated/functions_coordinator"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/functions/generated/functions_coordinator"
+	"github.com/smartcontractkit/chainlink-evm/pkg/client/clienttest"
+	"github.com/smartcontractkit/chainlink-evm/pkg/logpoller"
+	lpmocks "github.com/smartcontractkit/chainlink/v2/common/logpoller/mocks"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/functions/config"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/types"
 )
@@ -54,9 +53,9 @@ func addr(t *testing.T, lastByte string) []byte {
 	return contractAddr
 }
 
-func setUp(t *testing.T, updateFrequencySec uint32) (*lpmocks.LogPoller, types.LogPollerWrapper, *evmclimocks.Client) {
-	lggr := logger.TestLogger(t)
-	client := evmclimocks.NewClient(t)
+func setUp(t *testing.T, updateFrequencySec uint32) (*lpmocks.LogPoller, types.LogPollerWrapper, *clienttest.Client) {
+	lggr := logger.Test(t)
+	client := clienttest.NewClient(t)
 	lp := lpmocks.NewLogPoller(t)
 	config := config.PluginConfig{
 		ContractUpdateCheckFrequencySec: updateFrequencySec,
@@ -90,7 +89,7 @@ func TestLogPollerWrapper_SingleSubscriberEmptyEvents(t *testing.T) {
 	t.Parallel()
 	ctx := testutils.Context(t)
 	lp, lpWrapper, client := setUp(t, 100_000) // check only once
-	lp.On("LatestBlock", mock.Anything).Return(logpoller.LogPollerBlock{BlockNumber: int64(100)}, nil)
+	lp.On("LatestBlock", mock.Anything).Return(logpoller.Block{BlockNumber: int64(100)}, nil)
 
 	lp.On("Logs", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return([]logpoller.Log{}, nil)
 	client.On("CallContract", mock.Anything, mock.Anything, mock.Anything).Return(addr(t, "01"), nil)
@@ -112,7 +111,7 @@ func TestLogPollerWrapper_ErrorOnZeroAddresses(t *testing.T) {
 	t.Parallel()
 	ctx := testutils.Context(t)
 	lp, lpWrapper, client := setUp(t, 100_000) // check only once
-	lp.On("LatestBlock", mock.Anything).Return(logpoller.LogPollerBlock{BlockNumber: int64(100)}, nil)
+	lp.On("LatestBlock", mock.Anything).Return(logpoller.Block{BlockNumber: int64(100)}, nil)
 
 	client.On("CallContract", mock.Anything, mock.Anything, mock.Anything).Return(addr(t, "00"), nil)
 
@@ -125,7 +124,7 @@ func TestLogPollerWrapper_LatestEvents_ReorgHandling(t *testing.T) {
 	t.Parallel()
 	ctx := testutils.Context(t)
 	lp, lpWrapper, client := setUp(t, 100_000)
-	lp.On("LatestBlock", mock.Anything).Return(logpoller.LogPollerBlock{BlockNumber: int64(100)}, nil)
+	lp.On("LatestBlock", mock.Anything).Return(logpoller.Block{BlockNumber: int64(100)}, nil)
 	client.On("CallContract", mock.Anything, mock.Anything, mock.Anything).Return(addr(t, "01"), nil)
 	lp.On("RegisterFilter", mock.Anything, mock.Anything).Return(nil)
 	lp.On("GetFilters").Return(map[string]logpoller.Filter{}, nil)

@@ -1,4 +1,5 @@
 InsecureFastScrypt = false
+InsecurePPROFHeap = false
 RootDir = 'my/root/dir'
 ShutdownGracePeriod = '5s'
 
@@ -6,6 +7,8 @@ ShutdownGracePeriod = '5s'
 FeedsManager = true
 LogPoller = false
 UICSAKeys = false
+CCIP = true
+MultiFeedsManagers = false
 
 [Database]
 DefaultIdleInTxSessionTimeout = '1h0m0s'
@@ -33,7 +36,7 @@ LeaseDuration = '10s'
 LeaseRefreshInterval = '1s'
 
 [TelemetryIngress]
-UniConn = true
+UniConn = false
 Logging = false
 BufferSize = 100
 MaxBatchSize = 50
@@ -91,6 +94,19 @@ UserAPITokenDuration = '240h0m0s'
 UpstreamSyncInterval = '0s'
 UpstreamSyncRateLimit = '2m0s'
 
+[WebServer.OIDC]
+ClientID = ''
+ProviderURL = ''
+RedirectURL = ''
+ClaimName = 'groups'
+AdminClaim = 'NodeAdmins'
+EditClaim = 'NodeEditors'
+RunClaim = 'NodeRunners'
+ReadClaim = 'NodeReadOnly'
+SessionTimeout = '15m0s'
+UserAPITokenEnabled = false
+UserAPITokenDuration = '240h0m0s'
+
 [WebServer.MFA]
 RPID = ''
 RPOrigin = ''
@@ -137,6 +153,7 @@ DatabaseTimeout = '20s'
 KeyBundleID = '0000000000000000000000000000000000000000000000000000000000000000'
 CaptureEATelemetry = false
 CaptureAutomationCustomTelemetry = true
+AllowNoBootstrappers = false
 DefaultTransactionQueueDepth = 1
 SimulateTransactions = false
 TraceLogging = false
@@ -153,6 +170,7 @@ SimulateTransactions = false
 TransmitterAddress = ''
 CaptureEATelemetry = false
 TraceLogging = false
+ConfigLogValidation = false
 
 [P2P]
 IncomingMessageBufferSize = 999
@@ -222,6 +240,8 @@ Mode = 'tls'
 TLSCertPath = ''
 
 [Mercury]
+VerboseLogging = false
+
 [Mercury.Cache]
 LatestReportTTL = '1s'
 MaxStaleAge = '1h0m0s'
@@ -231,10 +251,20 @@ LatestReportDeadline = '5s'
 CertFile = ''
 
 [Mercury.Transmitter]
-TransmitQueueMaxSize = 10000
+Protocol = 'grpc'
+TransmitQueueMaxSize = 250000
 TransmitTimeout = '5s'
+TransmitConcurrency = 100
+ReaperFrequency = '1h0m0s'
+ReaperMaxAge = '48h0m0s'
 
 [Capabilities]
+[Capabilities.RateLimit]
+GlobalRPS = 200.0
+GlobalBurst = 200
+PerSenderRPS = 200.0
+PerSenderBurst = 200
+
 [Capabilities.Peering]
 IncomingMessageBufferSize = 10
 OutgoingMessageBufferSize = 10
@@ -249,13 +279,73 @@ DeltaDial = '15s'
 DeltaReconcile = '1m0s'
 ListenAddresses = []
 
+[Capabilities.Dispatcher]
+SupportedVersion = 1
+ReceiverBufferSize = 10000
+
+[Capabilities.Dispatcher.RateLimit]
+GlobalRPS = 800.0
+GlobalBurst = 1000
+PerSenderRPS = 10.0
+PerSenderBurst = 50
+
+[Capabilities.ExternalRegistry]
+Address = ''
+NetworkID = 'evm'
+ChainID = '1'
+
+[Capabilities.WorkflowRegistry]
+Address = ''
+NetworkID = 'evm'
+ChainID = '1'
+MaxBinarySize = '20.00mb'
+MaxEncryptedSecretsSize = '26.40kb'
+MaxConfigSize = '50.00kb'
+SyncStrategy = 'event'
+
+[Capabilities.GatewayConnector]
+ChainIDForNodeKey = ''
+NodeAddress = ''
+DonID = ''
+WSHandshakeTimeoutMillis = 0
+AuthMinChallengeLen = 0
+AuthTimestampToleranceSec = 0
+
+[[Capabilities.GatewayConnector.Gateways]]
+ID = ''
+URL = ''
+
+[Telemetry]
+Enabled = false
+CACertFile = ''
+Endpoint = ''
+InsecureConnection = false
+TraceSampleRatio = 0.01
+EmitterBatchProcessor = true
+EmitterExportTimeout = '1s'
+ChipIngressEndpoint = ''
+
+[Workflows]
+[Workflows.Limits]
+Global = 200
+PerOwner = 200
+
+[CRE]
+[CRE.Streams]
+WsURL = ''
+RestURL = ''
+
+[Billing]
+URL = 'localhost:4319'
+
 [[EVM]]
 ChainID = '1'
 AutoCreateKey = true
 BlockBackfillDepth = 10
 BlockBackfillSkip = false
 FinalityDepth = 26
-FinalityTagEnabled = false
+SafeDepth = 0
+FinalityTagEnabled = true
 LinkContractAddress = '0x514910771AF9Ca656af840dff83E8264EcF986CA'
 LogBackfillBatchSize = 1000
 LogPollInterval = '15s'
@@ -267,16 +357,27 @@ MinContractPayment = '0.1 link'
 NonceAutoSync = true
 NoNewHeadsThreshold = '3m0s'
 OperatorFactoryAddress = '0x3E64Cd889482443324F91bFA9c84fE72A511f48A'
+LogBroadcasterEnabled = true
 RPCDefaultBatchSize = 250
 RPCBlockQueryDelay = 1
+FinalizedBlockOffset = 12
+NoNewFinalizedHeadsThreshold = '9m0s'
 
 [EVM.Transactions]
+Enabled = true
 ForwardersEnabled = false
 MaxInFlight = 16
 MaxQueued = 250
 ReaperInterval = '1h0m0s'
 ReaperThreshold = '168h0m0s'
 ResendAfterThreshold = '1m0s'
+ConfirmationTimeout = '5m0s'
+
+[EVM.Transactions.AutoPurge]
+Enabled = false
+
+[EVM.Transactions.TransactionManagerV2]
+Enabled = false
 
 [EVM.BalanceMonitor]
 Enabled = true
@@ -290,6 +391,7 @@ LimitDefault = 500000
 LimitMax = 500000
 LimitMultiplier = '1'
 LimitTransfer = 21000
+EstimateLimit = false
 BumpMin = '5 gwei'
 BumpPercent = 20
 BumpThreshold = 3
@@ -305,10 +407,16 @@ CheckInclusionBlocks = 12
 CheckInclusionPercentile = 90
 TransactionPercentile = 50
 
+[EVM.GasEstimator.FeeHistory]
+CacheTimeout = '10s'
+
 [EVM.HeadTracker]
 HistoryDepth = 100
 MaxBufferSize = 3
 SamplingInterval = '1s'
+MaxAllowedFinalityDepth = 10000
+FinalityTagBypass = false
+PersistenceEnabled = true
 
 [EVM.NodePool]
 PollFailureThreshold = 5
@@ -318,6 +426,10 @@ SyncThreshold = 5
 LeaseDuration = '0s'
 NodeIsSyncingEnabled = false
 FinalizedBlockPollInterval = '5s'
+EnforceRepeatableRead = true
+DeathDeclarationDelay = '1m0s'
+NewHeadsPollInterval = '0s'
+VerifyChainID = true
 
 [EVM.OCR]
 ContractConfirmations = 4
@@ -330,6 +442,12 @@ ObservationGracePeriod = '1s'
 [EVM.OCR2]
 [EVM.OCR2.Automation]
 GasLimit = 10500000
+
+[EVM.Workflow]
+GasLimitDefault = 400000
+TxAcceptanceState = 2
+PollPeriod = '2s'
+AcceptanceTimeout = '30s'
 
 [[EVM.Nodes]]
 Name = 'primary'
@@ -346,6 +464,7 @@ AutoCreateKey = true
 BlockBackfillDepth = 10
 BlockBackfillSkip = false
 FinalityDepth = 50
+SafeDepth = 0
 FinalityTagEnabled = false
 LinkContractAddress = '0xa36085F69e2889c224210F603D836748e7dC0088'
 LogBackfillBatchSize = 1000
@@ -358,16 +477,27 @@ MinContractPayment = '0.1 link'
 NonceAutoSync = true
 NoNewHeadsThreshold = '3m0s'
 OperatorFactoryAddress = '0x8007e24251b1D2Fc518Eb843A701d9cD21fe0aA3'
+LogBroadcasterEnabled = true
 RPCDefaultBatchSize = 250
 RPCBlockQueryDelay = 1
+FinalizedBlockOffset = 0
+NoNewFinalizedHeadsThreshold = '0s'
 
 [EVM.Transactions]
+Enabled = true
 ForwardersEnabled = false
 MaxInFlight = 16
 MaxQueued = 250
 ReaperInterval = '1h0m0s'
 ReaperThreshold = '168h0m0s'
 ResendAfterThreshold = '1m0s'
+ConfirmationTimeout = '1m0s'
+
+[EVM.Transactions.AutoPurge]
+Enabled = false
+
+[EVM.Transactions.TransactionManagerV2]
+Enabled = false
 
 [EVM.BalanceMonitor]
 Enabled = true
@@ -381,6 +511,7 @@ LimitDefault = 500000
 LimitMax = 500000
 LimitMultiplier = '1'
 LimitTransfer = 21000
+EstimateLimit = false
 BumpMin = '5 gwei'
 BumpPercent = 20
 BumpThreshold = 3
@@ -396,10 +527,16 @@ CheckInclusionBlocks = 12
 CheckInclusionPercentile = 90
 TransactionPercentile = 50
 
+[EVM.GasEstimator.FeeHistory]
+CacheTimeout = '10s'
+
 [EVM.HeadTracker]
 HistoryDepth = 100
 MaxBufferSize = 3
 SamplingInterval = '1s'
+MaxAllowedFinalityDepth = 10000
+FinalityTagBypass = false
+PersistenceEnabled = true
 
 [EVM.NodePool]
 PollFailureThreshold = 5
@@ -409,6 +546,10 @@ SyncThreshold = 5
 LeaseDuration = '0s'
 NodeIsSyncingEnabled = false
 FinalizedBlockPollInterval = '5s'
+EnforceRepeatableRead = true
+DeathDeclarationDelay = '1m0s'
+NewHeadsPollInterval = '0s'
+VerifyChainID = true
 
 [EVM.OCR]
 ContractConfirmations = 4
@@ -422,6 +563,12 @@ ObservationGracePeriod = '1s'
 [EVM.OCR2.Automation]
 GasLimit = 5400000
 
+[EVM.Workflow]
+GasLimitDefault = 400000
+TxAcceptanceState = 2
+PollPeriod = '2s'
+AcceptanceTimeout = '30s'
+
 [[EVM.Nodes]]
 Name = 'foo'
 WSURL = 'wss://web.socket/test/foo'
@@ -432,7 +579,8 @@ AutoCreateKey = true
 BlockBackfillDepth = 10
 BlockBackfillSkip = false
 FinalityDepth = 500
-FinalityTagEnabled = false
+SafeDepth = 0
+FinalityTagEnabled = true
 LinkContractAddress = '0xb0897686c545045aFc77CF20eC7A532E3120E0F1'
 LogBackfillBatchSize = 1000
 LogPollInterval = '1s'
@@ -443,16 +591,27 @@ MinIncomingConfirmations = 5
 MinContractPayment = '0.00001 link'
 NonceAutoSync = true
 NoNewHeadsThreshold = '30s'
+LogBroadcasterEnabled = true
 RPCDefaultBatchSize = 100
 RPCBlockQueryDelay = 10
+FinalizedBlockOffset = 0
+NoNewFinalizedHeadsThreshold = '6m0s'
 
 [EVM.Transactions]
+Enabled = true
 ForwardersEnabled = false
 MaxInFlight = 16
 MaxQueued = 5000
 ReaperInterval = '1h0m0s'
 ReaperThreshold = '168h0m0s'
 ResendAfterThreshold = '1m0s'
+ConfirmationTimeout = '1m0s'
+
+[EVM.Transactions.AutoPurge]
+Enabled = false
+
+[EVM.Transactions.TransactionManagerV2]
+Enabled = false
 
 [EVM.BalanceMonitor]
 Enabled = true
@@ -466,6 +625,7 @@ LimitDefault = 500000
 LimitMax = 500000
 LimitMultiplier = '1'
 LimitTransfer = 21000
+EstimateLimit = false
 BumpMin = '20 gwei'
 BumpPercent = 20
 BumpThreshold = 5
@@ -481,10 +641,16 @@ CheckInclusionBlocks = 12
 CheckInclusionPercentile = 90
 TransactionPercentile = 60
 
+[EVM.GasEstimator.FeeHistory]
+CacheTimeout = '10s'
+
 [EVM.HeadTracker]
 HistoryDepth = 2000
 MaxBufferSize = 3
 SamplingInterval = '1s'
+MaxAllowedFinalityDepth = 10000
+FinalityTagBypass = false
+PersistenceEnabled = true
 
 [EVM.NodePool]
 PollFailureThreshold = 5
@@ -494,6 +660,10 @@ SyncThreshold = 10
 LeaseDuration = '0s'
 NodeIsSyncingEnabled = false
 FinalizedBlockPollInterval = '5s'
+EnforceRepeatableRead = true
+DeathDeclarationDelay = '1m0s'
+NewHeadsPollInterval = '0s'
+VerifyChainID = true
 
 [EVM.OCR]
 ContractConfirmations = 4
@@ -507,48 +677,19 @@ ObservationGracePeriod = '1s'
 [EVM.OCR2.Automation]
 GasLimit = 5400000
 
+[EVM.Workflow]
+GasLimitDefault = 400000
+TxAcceptanceState = 2
+PollPeriod = '2s'
+AcceptanceTimeout = '30s'
+
 [[EVM.Nodes]]
 Name = 'bar'
 WSURL = 'wss://web.socket/test/bar'
 
-[[Cosmos]]
-ChainID = 'Ibiza-808'
-Bech32Prefix = 'wasm'
-BlockRate = '6s'
-BlocksUntilTxTimeout = 30
-ConfirmPollPeriod = '1s'
-FallbackGasPrice = '0.015'
-GasToken = 'ucosm'
-GasLimitMultiplier = '1.5'
-MaxMsgsPerBatch = 13
-OCR2CachePollPeriod = '4s'
-OCR2CacheTTL = '1m0s'
-TxMsgTimeout = '10m0s'
-
-[[Cosmos.Nodes]]
-Name = 'primary'
-TendermintURL = 'http://columbus.cosmos.com'
-
-[[Cosmos]]
-ChainID = 'Malaga-420'
-Bech32Prefix = 'wasm'
-BlockRate = '6s'
-BlocksUntilTxTimeout = 20
-ConfirmPollPeriod = '1s'
-FallbackGasPrice = '0.015'
-GasToken = 'ucosm'
-GasLimitMultiplier = '1.5'
-MaxMsgsPerBatch = 100
-OCR2CachePollPeriod = '4s'
-OCR2CacheTTL = '1m0s'
-TxMsgTimeout = '10m0s'
-
-[[Cosmos.Nodes]]
-Name = 'secondary'
-TendermintURL = 'http://bombay.cosmos.com'
-
 [[Solana]]
 ChainID = 'mainnet'
+BlockTime = '500ms'
 BalancePollPeriod = '5s'
 ConfirmPollPeriod = '500ms'
 OCR2CachePollPeriod = '1s'
@@ -556,6 +697,8 @@ OCR2CacheTTL = '1m0s'
 TxTimeout = '1m0s'
 TxRetryTimeout = '10s'
 TxConfirmTimeout = '30s'
+TxExpirationRebroadcast = false
+TxRetentionTimeout = '0s'
 SkipPreflight = true
 Commitment = 'confirmed'
 MaxRetries = 12
@@ -564,13 +707,41 @@ ComputeUnitPriceMax = 1000
 ComputeUnitPriceMin = 0
 ComputeUnitPriceDefault = 0
 FeeBumpPeriod = '3s'
+BlockHistoryPollPeriod = '5s'
+BlockHistorySize = 1
+BlockHistoryBatchLoadSize = 20
+ComputeUnitLimitDefault = 200000
+EstimateComputeUnitLimit = false
+LogPollerStartingLookback = '24h0m0s'
+
+[Solana.MultiNode]
+Enabled = false
+PollFailureThreshold = 5
+PollInterval = '1s'
+SelectionMode = 'HighestHead'
+SyncThreshold = 5
+NodeIsSyncingEnabled = false
+LeaseDuration = '1m0s'
+NewHeadsPollInterval = '1s'
+FinalizedBlockPollInterval = '1s'
+EnforceRepeatableRead = true
+DeathDeclarationDelay = '1m0s'
+VerifyChainID = true
+NodeNoNewHeadsThreshold = '1m0s'
+NoNewFinalizedHeadsThreshold = '1m0s'
+FinalityDepth = 0
+FinalityTagEnabled = true
+FinalizedBlockOffset = 0
 
 [[Solana.Nodes]]
 Name = 'primary'
 URL = 'http://mainnet.solana.com'
+SendOnly = false
+Order = 1
 
 [[Solana]]
 ChainID = 'testnet'
+BlockTime = '500ms'
 BalancePollPeriod = '5s'
 ConfirmPollPeriod = '500ms'
 OCR2CachePollPeriod = '1m0s'
@@ -578,6 +749,8 @@ OCR2CacheTTL = '1m0s'
 TxTimeout = '1m0s'
 TxRetryTimeout = '10s'
 TxConfirmTimeout = '30s'
+TxExpirationRebroadcast = false
+TxRetentionTimeout = '0s'
 SkipPreflight = true
 Commitment = 'confirmed'
 MaxRetries = 0
@@ -586,21 +759,34 @@ ComputeUnitPriceMax = 1000
 ComputeUnitPriceMin = 0
 ComputeUnitPriceDefault = 0
 FeeBumpPeriod = '3s'
+BlockHistoryPollPeriod = '5s'
+BlockHistorySize = 1
+BlockHistoryBatchLoadSize = 20
+ComputeUnitLimitDefault = 200000
+EstimateComputeUnitLimit = false
+LogPollerStartingLookback = '24h0m0s'
+
+[Solana.MultiNode]
+Enabled = false
+PollFailureThreshold = 5
+PollInterval = '1s'
+SelectionMode = 'HighestHead'
+SyncThreshold = 5
+NodeIsSyncingEnabled = false
+LeaseDuration = '1m0s'
+NewHeadsPollInterval = '1s'
+FinalizedBlockPollInterval = '1s'
+EnforceRepeatableRead = true
+DeathDeclarationDelay = '1m0s'
+VerifyChainID = true
+NodeNoNewHeadsThreshold = '1m0s'
+NoNewFinalizedHeadsThreshold = '1m0s'
+FinalityDepth = 0
+FinalityTagEnabled = true
+FinalizedBlockOffset = 0
 
 [[Solana.Nodes]]
 Name = 'secondary'
 URL = 'http://testnet.solana.com'
-
-[[Starknet]]
-ChainID = 'foobar'
-FeederURL = 'http://feeder.url'
-OCR2CachePollPeriod = '5s'
-OCR2CacheTTL = '1m0s'
-RequestTimeout = '10s'
-TxTimeout = '10s'
-ConfirmationPoll = '1h0m0s'
-
-[[Starknet.Nodes]]
-Name = 'primary'
-URL = 'http://stark.node'
-APIKey = 'key'
+SendOnly = false
+Order = 2

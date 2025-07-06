@@ -4,7 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
 )
 
@@ -13,7 +14,7 @@ type MockRunner struct {
 	Err  error
 }
 
-func (m *MockRunner) ExecuteRun(ctx context.Context, spec pipeline.Spec, vars pipeline.Vars, l logger.Logger) (run *pipeline.Run, trrs pipeline.TaskRunResults, err error) {
+func (m *MockRunner) ExecuteRun(ctx context.Context, spec pipeline.Spec, vars pipeline.Vars) (run *pipeline.Run, trrs pipeline.TaskRunResults, err error) {
 	return &pipeline.Run{ID: 42}, m.Trrs, m.Err
 }
 
@@ -22,6 +23,10 @@ var _ pipeline.Task = &MockTask{}
 type MockTask struct {
 	result pipeline.Result
 }
+
+func (m *MockTask) GetDescendantTasks() []pipeline.Task { return nil }
+
+func (m *MockTask) TaskTags() string { return "{\"anything\": \"here\"}" }
 
 func (m *MockTask) Type() pipeline.TaskType { return "MockTask" }
 func (m *MockTask) ID() int                 { return 0 }
@@ -37,3 +42,4 @@ func (m *MockTask) TaskTimeout() (time.Duration, bool) { return 0, false }
 func (m *MockTask) TaskRetries() uint32                { return 0 }
 func (m *MockTask) TaskMinBackoff() time.Duration      { return 0 }
 func (m *MockTask) TaskMaxBackoff() time.Duration      { return 0 }
+func (m *MockTask) TaskStreamID() *uint32              { return nil }

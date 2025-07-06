@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,10 +22,10 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mathutil"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/log"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/solidity_vrf_coordinator_interface"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/solidity_vrf_coordinator_interface"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/log"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/recovery"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
@@ -153,7 +154,7 @@ func (lsn *Listener) Start(ctx context.Context) error {
 		go lsn.RunLogListener([]func(){unsubscribeLogs}, spec.MinIncomingConfirmations)
 		go lsn.RunHeadListener(unsubscribeHeadBroadcaster)
 
-		lsn.MailMon.Monitor(lsn.ReqLogs, "VRFListener", "RequestLogs", fmt.Sprint(lsn.Job.ID))
+		lsn.MailMon.Monitor(lsn.ReqLogs, "VRFListener", "RequestLogs", strconv.Itoa(int(lsn.Job.ID)))
 		return nil
 	})
 }
@@ -484,7 +485,7 @@ func (lsn *Listener) ProcessRequest(ctx context.Context, req request) bool {
 
 	run := pipeline.NewRun(*lsn.Job.PipelineSpec, vars)
 	// The VRF pipeline has no async tasks, so we don't need to check for `incomplete`
-	if _, err = lsn.PipelineRunner.Run(ctx, run, lggr, true, func(tx sqlutil.DataSource) error {
+	if _, err = lsn.PipelineRunner.Run(ctx, run, true, func(tx sqlutil.DataSource) error {
 		// Always mark consumed regardless of whether the proof failed or not.
 		if err = lsn.Chain.LogBroadcaster().MarkConsumed(ctx, tx, req.lb); err != nil {
 			lggr.Errorw("Failed mark consumed", "err", err)

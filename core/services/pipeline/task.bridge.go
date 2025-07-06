@@ -14,9 +14,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/multierr"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline/internal/eautils"
+	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline/eautils"
 )
 
 // NOTE: These metrics generate a new label per bridge, this should be safe
@@ -27,9 +28,9 @@ import (
 var (
 	promBridgeLatency = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bridge_latency_seconds",
-		Help: "Bridge latency in seconds scoped by name",
+		Help: "Bridge latency in seconds scoped by name and response status code",
 	},
-		[]string{"name"},
+		[]string{"name", "status_code_group"},
 	)
 	promBridgeErrors = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "bridge_errors_total",
@@ -71,11 +72,23 @@ type BridgeTask struct {
 	httpClient   *http.Client
 }
 
+type BridgeTelemetry struct {
+	RequestStartTimestamp  time.Time `json:"requestStartTimestamp"`
+	RequestFinishTimestamp time.Time `json:"requestFinishTimestamp"`
+	RequestData            []byte    `json:"requestData"`
+	ResponseData           []byte    `json:"responseData"`
+	Name                   string    `json:"name"`
+	DotID                  string    `json:"dotID"`
+	ResponseError          *string   `json:"responseError"`
+	StreamID               *uint32   `json:"streamID"`
+	SpecID                 int32     `json:"specID"`
+	ResponseStatusCode     int       `json:"responseStatusCode"`
+	LocalCacheHit          bool      `json:"localCacheHit"`
+}
+
 var _ Task = (*BridgeTask)(nil)
 
 var zeroURL = new(url.URL)
-
-const stalenessCap = 30 * time.Minute
 
 func (t *BridgeTask) Type() TaskType {
 	return TaskTypeBridge
@@ -109,7 +122,10 @@ func (t *BridgeTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, inp
 		return Result{Error: errors.Errorf("headers must have an even number of elements")}, runInfo
 	}
 
-	url, err := t.getBridgeURLFromName(ctx, name)
+	overtimeCtx, cancel := overtimeContext(ctx)
+	defer cancel()
+
+	url, err := t.getBridgeURLFromName(overtimeCtx, name)
 	if err != nil {
 		return Result{Error: err}, runInfo
 	}
@@ -151,7 +167,7 @@ func (t *BridgeTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, inp
 	if err != nil {
 		return Result{Error: err}, runInfo
 	}
-	lggr.Tracew("Bridge task: sending request",
+	logger.Sugared(lggr).Tracew("Bridge task: sending request",
 		"requestData", string(requestDataJSON),
 		"url", url.String(),
 	)
@@ -159,15 +175,39 @@ func (t *BridgeTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, inp
 	requestCtx, cancel := httpRequestCtx(ctx, t, t.config)
 	defer cancel()
 
-	// cacheTTL should not exceed stalenessCap.
-	cacheDuration := time.Duration(cacheTTL) * time.Second
-	if cacheDuration > stalenessCap {
-		lggr.Warnf("bridge task cacheTTL exceeds stalenessCap %s, overriding value to stalenessCap", stalenessCap)
-		cacheDuration = stalenessCap
-	}
-
 	var cachedResponse bool
-	responseBytes, statusCode, headers, elapsed, err := makeHTTPRequest(requestCtx, lggr, "POST", url, reqHeaders, requestData, t.httpClient, t.config.DefaultHTTPLimit())
+	responseBytes, statusCode, headers, start, finish, err := makeHTTPRequest(requestCtx, lggr, "POST", url, reqHeaders, requestData, t.httpClient, t.config.DefaultHTTPLimit())
+	elapsed := finish.Sub(start)
+	promBridgeLatency.WithLabelValues(t.Name, statusCodeGroup(statusCode)).Set(elapsed.Seconds())
+
+	defer func() {
+		telemetryCh := GetTelemetryCh(ctx)
+		if telemetryCh != nil {
+			bt := &BridgeTelemetry{
+				Name:                   t.Name,
+				RequestData:            requestDataJSON,
+				ResponseData:           responseBytes,
+				ResponseStatusCode:     statusCode,
+				RequestStartTimestamp:  start,
+				RequestFinishTimestamp: finish,
+				LocalCacheHit:          cachedResponse,
+				SpecID:                 t.specId,
+				DotID:                  t.DotID(),
+			}
+			if err != nil {
+				bt.ResponseError = new(string)
+				*bt.ResponseError = err.Error()
+			}
+			if t.StreamID.Valid {
+				bt.StreamID = &t.StreamID.Uint32
+			}
+			select {
+			case telemetryCh <- bt:
+			default:
+				lggr.Warn("bridge task: telemetry channel is full, dropping telemetry")
+			}
+		}
+	}()
 
 	// check for external adapter response object status
 	if code, ok := eautils.BestEffortExtractEAStatus(responseBytes); ok {
@@ -175,13 +215,23 @@ func (t *BridgeTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, inp
 	}
 
 	if err != nil || statusCode != http.StatusOK {
+		if adapterErr := eautils.BestEffortExtractEAError(responseBytes); adapterErr != nil {
+			err = adapterErr
+		}
+
 		promBridgeErrors.WithLabelValues(t.Name).Inc()
 		if cacheTTL == 0 {
+			lggr.Debugw("Bridge task: request failed",
+				"response", string(responseBytes),
+				"url", url.String(),
+				"status_code", statusCode,
+				"error", err,
+			)
 			return Result{Error: err}, RunInfo{IsRetryable: isRetryableHTTPError(statusCode, err)}
 		}
 
 		var cacheErr error
-		responseBytes, cacheErr = t.orm.GetCachedResponse(ctx, t.dotID, t.specId, cacheDuration)
+		responseBytes, cacheErr = t.orm.GetCachedResponse(overtimeCtx, t.dotID, t.specId, time.Duration(cacheTTL)*time.Second) //nolint:gosec // G115
 		if cacheErr != nil {
 			promBridgeCacheErrors.WithLabelValues(t.Name).Inc()
 			if !errors.Is(cacheErr, sql.ErrNoRows) {
@@ -198,8 +248,6 @@ func (t *BridgeTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, inp
 			"url", url.String(),
 		)
 		cachedResponse = true
-	} else {
-		promBridgeLatency.WithLabelValues(t.Name).Set(elapsed.Seconds())
 	}
 
 	if t.Async == "true" {
@@ -217,7 +265,7 @@ func (t *BridgeTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, inp
 	}
 
 	if !cachedResponse && cacheTTL > 0 {
-		err := t.orm.UpsertBridgeResponse(ctx, t.dotID, t.specId, responseBytes)
+		err := t.orm.UpsertBridgeResponse(overtimeCtx, t.dotID, t.specId, responseBytes)
 		if err != nil {
 			lggr.Errorw("Bridge task: failed to upsert response in bridge cache", "err", err)
 		}
@@ -232,7 +280,7 @@ func (t *BridgeTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, inp
 	promHTTPFetchTime.WithLabelValues(t.DotID()).Set(float64(elapsed))
 	promHTTPResponseBodySize.WithLabelValues(t.DotID()).Set(float64(len(responseBytes)))
 
-	lggr.Tracew("Bridge task: fetched answer",
+	logger.Sugared(lggr).Tracew("Bridge task: fetched answer",
 		"answer", result.Value,
 		"url", url.String(),
 		"dotID", t.DotID(),
@@ -241,7 +289,7 @@ func (t *BridgeTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, inp
 	return result, runInfo
 }
 
-func (t BridgeTask) getBridgeURLFromName(ctx context.Context, name StringParam) (URLParam, error) {
+func (t *BridgeTask) getBridgeURLFromName(ctx context.Context, name StringParam) (URLParam, error) {
 	bt, err := t.orm.FindBridge(ctx, bridges.BridgeName(name))
 	if err != nil {
 		return URLParam{}, errors.Wrapf(err, "could not find bridge with name '%s'", name)

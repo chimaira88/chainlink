@@ -99,6 +99,11 @@ func NewRouter(app chainlink.Application, prometheus *ginprom.Prometheus) (*gin.
 		graphqlHandler(app),
 	)
 
+	err = app.AuthenticationProvider().ExtendRouter(api)
+	if err != nil {
+		return nil, err
+	}
+
 	return engine, nil
 }
 
@@ -228,7 +233,6 @@ func loopRoutes(app chainlink.Application, r *gin.RouterGroup) {
 	loopRegistry := NewLoopRegistryServer(app)
 	r.GET("/discovery", ginHandlerFromHTTP(loopRegistry.discoveryHandler))
 	r.GET("/plugins/:name/metrics", loopRegistry.pluginMetricHandler)
-
 }
 
 func v2Routes(app chainlink.Application, r *gin.RouterGroup) {
@@ -351,8 +355,9 @@ func v2Routes(app chainlink.Application, r *gin.RouterGroup) {
 			{"solana", NewSolanaKeysController(app)},
 			{"cosmos", NewCosmosKeysController(app)},
 			{"starknet", NewStarkNetKeysController(app)},
-			{"dkgsign", NewDKGSignKeysController(app)},
-			{"dkgencrypt", NewDKGEncryptKeysController(app)},
+			{"aptos", NewAptosKeysController(app)},
+			{"tron", NewTronKeysController(app)},
+			{"ton", NewTONKeysController(app)},
 		} {
 			authv2.GET("/keys/"+keys.path, keys.kc.Index)
 			authv2.POST("/keys/"+keys.path, auth.RequiresEditRole(keys.kc.Create))
@@ -392,36 +397,23 @@ func v2Routes(app chainlink.Application, r *gin.RouterGroup) {
 		authv2.PATCH("/log", auth.RequiresAdminRole(lgc.Patch))
 
 		chains := authv2.Group("chains")
-		for _, chain := range []struct {
-			path string
-			cc   ChainsController
-		}{
-			{"evm", NewEVMChainsController(app)},
-			{"solana", NewSolanaChainsController(app)},
-			{"starknet", NewStarkNetChainsController(app)},
-			{"cosmos", NewCosmosChainsController(app)},
-		} {
-			chains.GET(chain.path, paginatedRequest(chain.cc.Index))
-			chains.GET(chain.path+"/:ID", chain.cc.Show)
-		}
+		chainController := NewChainsController(
+			app.GetRelayers(),
+			app.GetLogger(),
+			app.GetAuditLogger(),
+		)
+		chains.GET("", paginatedRequest(chainController.Index))
+		chains.GET("/:network", paginatedRequest(chainController.Index))
+		chains.GET("/:network/:ID", chainController.Show)
 
 		nodes := authv2.Group("nodes")
-		for _, chain := range []struct {
-			path string
-			nc   NodesController
-		}{
-			{"evm", NewEVMNodesController(app)},
-			{"solana", NewSolanaNodesController(app)},
-			{"starknet", NewStarkNetNodesController(app)},
-			{"cosmos", NewCosmosNodesController(app)},
-		} {
-			if chain.path == "evm" {
-				// TODO still EVM only https://app.shortcut.com/chainlinklabs/story/26276/multi-chain-type-ui-node-chain-configuration
-				nodes.GET("", paginatedRequest(chain.nc.Index))
-			}
-			nodes.GET(chain.path, paginatedRequest(chain.nc.Index))
-			chains.GET(chain.path+"/:ID/nodes", paginatedRequest(chain.nc.Index))
-		}
+		nodesController := NewNodesController(
+			app.GetRelayers(),
+			app.GetAuditLogger(),
+		)
+		nodes.GET("", paginatedRequest(nodesController.Index))
+		nodes.GET("/:network", paginatedRequest(nodesController.Index))
+		chains.GET("/:network/:ID/nodes", paginatedRequest(nodesController.Index))
 
 		efc := EVMForwardersController{app}
 		authv2.GET("/nodes/evm/forwarders", paginatedRequest(efc.Index))
@@ -432,7 +424,7 @@ func v2Routes(app chainlink.Application, r *gin.RouterGroup) {
 		authv2.GET("/build_info", buildInfo.Show)
 
 		// Debug routes accessible via authentication
-		metricRoutes(authv2, build.IsDev())
+		metricRoutes(authv2, app.GetConfig().InsecurePPROFHeap() || build.IsDev())
 	}
 
 	ping := PingController{app}
@@ -677,7 +669,7 @@ func prometheusHandler(token string, h http.Handler) gin.HandlerFunc {
 			return
 		}
 
-		bearer := fmt.Sprintf("Bearer %s", token)
+		bearer := "Bearer " + token
 
 		if header != bearer {
 			c.String(http.StatusUnauthorized, ginprom.ErrInvalidToken.Error())

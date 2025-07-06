@@ -11,6 +11,7 @@ AllowSimplePasswords = false
 
 # Effective Configuration, with defaults applied:
 InsecureFastScrypt = false
+InsecurePPROFHeap = false
 RootDir = '~/.chainlink'
 ShutdownGracePeriod = '5s'
 
@@ -18,6 +19,8 @@ ShutdownGracePeriod = '5s'
 FeedsManager = true
 LogPoller = false
 UICSAKeys = false
+CCIP = true
+MultiFeedsManagers = false
 
 [Database]
 DefaultIdleInTxSessionTimeout = '1h0m0s'
@@ -45,7 +48,7 @@ LeaseDuration = '10s'
 LeaseRefreshInterval = '1s'
 
 [TelemetryIngress]
-UniConn = true
+UniConn = false
 Logging = false
 BufferSize = 100
 MaxBatchSize = 50
@@ -103,6 +106,19 @@ UserAPITokenDuration = '240h0m0s'
 UpstreamSyncInterval = '0s'
 UpstreamSyncRateLimit = '2m0s'
 
+[WebServer.OIDC]
+ClientID = ''
+ProviderURL = ''
+RedirectURL = ''
+ClaimName = 'groups'
+AdminClaim = 'NodeAdmins'
+EditClaim = 'NodeEditors'
+RunClaim = 'NodeRunners'
+ReadClaim = 'NodeReadOnly'
+SessionTimeout = '15m0s'
+UserAPITokenEnabled = false
+UserAPITokenDuration = '240h0m0s'
+
 [WebServer.MFA]
 RPID = ''
 RPOrigin = ''
@@ -149,6 +165,7 @@ DatabaseTimeout = '10s'
 KeyBundleID = '0000000000000000000000000000000000000000000000000000000000000000'
 CaptureEATelemetry = false
 CaptureAutomationCustomTelemetry = true
+AllowNoBootstrappers = false
 DefaultTransactionQueueDepth = 1
 SimulateTransactions = false
 TraceLogging = false
@@ -165,6 +182,7 @@ SimulateTransactions = false
 TransmitterAddress = ''
 CaptureEATelemetry = false
 TraceLogging = false
+ConfigLogValidation = false
 
 [P2P]
 IncomingMessageBufferSize = 10
@@ -234,6 +252,8 @@ Mode = 'tls'
 TLSCertPath = ''
 
 [Mercury]
+VerboseLogging = false
+
 [Mercury.Cache]
 LatestReportTTL = '1s'
 MaxStaleAge = '1h0m0s'
@@ -243,10 +263,20 @@ LatestReportDeadline = '5s'
 CertFile = ''
 
 [Mercury.Transmitter]
-TransmitQueueMaxSize = 10000
+Protocol = 'grpc'
+TransmitQueueMaxSize = 250000
 TransmitTimeout = '5s'
+TransmitConcurrency = 100
+ReaperFrequency = '1h0m0s'
+ReaperMaxAge = '48h0m0s'
 
 [Capabilities]
+[Capabilities.RateLimit]
+GlobalRPS = 200.0
+GlobalBurst = 200
+PerSenderRPS = 200.0
+PerSenderBurst = 200
+
 [Capabilities.Peering]
 IncomingMessageBufferSize = 10
 OutgoingMessageBufferSize = 10
@@ -260,6 +290,65 @@ DefaultBootstrappers = []
 DeltaDial = '15s'
 DeltaReconcile = '1m0s'
 ListenAddresses = []
+
+[Capabilities.Dispatcher]
+SupportedVersion = 1
+ReceiverBufferSize = 10000
+
+[Capabilities.Dispatcher.RateLimit]
+GlobalRPS = 800.0
+GlobalBurst = 1000
+PerSenderRPS = 10.0
+PerSenderBurst = 50
+
+[Capabilities.ExternalRegistry]
+Address = ''
+NetworkID = 'evm'
+ChainID = '1'
+
+[Capabilities.WorkflowRegistry]
+Address = ''
+NetworkID = 'evm'
+ChainID = '1'
+MaxBinarySize = '20.00mb'
+MaxEncryptedSecretsSize = '26.40kb'
+MaxConfigSize = '50.00kb'
+SyncStrategy = 'event'
+
+[Capabilities.GatewayConnector]
+ChainIDForNodeKey = ''
+NodeAddress = ''
+DonID = ''
+WSHandshakeTimeoutMillis = 0
+AuthMinChallengeLen = 0
+AuthTimestampToleranceSec = 0
+
+[[Capabilities.GatewayConnector.Gateways]]
+ID = ''
+URL = ''
+
+[Telemetry]
+Enabled = false
+CACertFile = ''
+Endpoint = ''
+InsecureConnection = false
+TraceSampleRatio = 0.01
+EmitterBatchProcessor = true
+EmitterExportTimeout = '1s'
+ChipIngressEndpoint = ''
+
+[Workflows]
+[Workflows.Limits]
+Global = 200
+PerOwner = 200
+
+[CRE]
+[CRE.Streams]
+WsURL = ''
+RestURL = ''
+
+[Billing]
+URL = 'localhost:4319'
 
 Invalid configuration: invalid secrets: 2 errors:
 	- Database.URL: empty: must be provided and non-empty

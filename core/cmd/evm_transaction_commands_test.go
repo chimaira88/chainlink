@@ -13,9 +13,10 @@ import (
 	"github.com/urfave/cli"
 
 	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr/txmgrtest"
+
 	"github.com/smartcontractkit/chainlink/v2/core/cmd"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
@@ -32,8 +33,8 @@ func TestShell_IndexTransactions(t *testing.T) {
 
 	_, from := cltest.MustInsertRandomKey(t, app.KeyStore.Eth())
 
-	txStore := cltest.NewTestTxStore(t, app.GetDB())
-	tx := cltest.MustInsertConfirmedEthTxWithLegacyAttempt(t, txStore, 0, 1, from)
+	txStore := txmgrtest.NewTestTxStore(t, app.GetDB())
+	tx := txmgrtest.MustInsertConfirmedEthTxWithLegacyAttempt(t, txStore, 0, 1, from)
 	attempt := tx.TxAttempts[0]
 
 	// page 1
@@ -47,7 +48,7 @@ func TestShell_IndexTransactions(t *testing.T) {
 	assert.NoError(t, client.IndexTransactions(c))
 
 	renderedTxs := *r.Renders[0].(*cmd.EthTxPresenters)
-	assert.Equal(t, 1, len(renderedTxs))
+	assert.Len(t, renderedTxs, 1)
 	assert.Equal(t, attempt.Hash.String(), renderedTxs[0].Hash.Hex())
 
 	// page 2 which doesn't exist
@@ -61,7 +62,7 @@ func TestShell_IndexTransactions(t *testing.T) {
 	assert.NoError(t, client.IndexTransactions(c))
 
 	renderedTxs = *r.Renders[1].(*cmd.EthTxPresenters)
-	assert.Equal(t, 0, len(renderedTxs))
+	assert.Empty(t, renderedTxs)
 }
 
 func TestShell_ShowTransaction(t *testing.T) {
@@ -73,8 +74,8 @@ func TestShell_ShowTransaction(t *testing.T) {
 	db := app.GetDB()
 	_, from := cltest.MustInsertRandomKey(t, app.KeyStore.Eth())
 
-	txStore := cltest.NewTestTxStore(t, db)
-	tx := cltest.MustInsertConfirmedEthTxWithLegacyAttempt(t, txStore, 0, 1, from)
+	txStore := txmgrtest.NewTestTxStore(t, db)
+	tx := txmgrtest.MustInsertConfirmedEthTxWithLegacyAttempt(t, txStore, 0, 1, from)
 	attempt := tx.TxAttempts[0]
 
 	set := flag.NewFlagSet("test get tx", 0)
@@ -97,8 +98,8 @@ func TestShell_IndexTxAttempts(t *testing.T) {
 
 	_, from := cltest.MustInsertRandomKey(t, app.KeyStore.Eth())
 
-	txStore := cltest.NewTestTxStore(t, app.GetDB())
-	tx := cltest.MustInsertConfirmedEthTxWithLegacyAttempt(t, txStore, 0, 1, from)
+	txStore := txmgrtest.NewTestTxStore(t, app.GetDB())
+	tx := txmgrtest.MustInsertConfirmedEthTxWithLegacyAttempt(t, txStore, 0, 1, from)
 
 	// page 1
 	set := flag.NewFlagSet("test txattempts", 0)
@@ -125,7 +126,7 @@ func TestShell_IndexTxAttempts(t *testing.T) {
 	assert.NoError(t, client.IndexTxAttempts(c))
 
 	renderedAttempts = *r.Renders[1].(*cmd.EthTxPresenters)
-	assert.Equal(t, 0, len(renderedAttempts))
+	assert.Empty(t, renderedAttempts)
 }
 
 func TestShell_SendEther_From_Txm(t *testing.T) {
@@ -140,8 +141,7 @@ func TestShell_SendEther_From_Txm(t *testing.T) {
 	ethMock := newEthMockWithTransactionsOnBlocksAssertions(t)
 
 	ethMock.On("BalanceAt", mock.Anything, key.Address, (*big.Int)(nil)).Return(balance.ToInt(), nil)
-	ethMock.On("SequenceAt", mock.Anything, mock.Anything, mock.Anything).Return(evmtypes.Nonce(0), nil).Maybe()
-	ethMock.On("PendingNonceAt", mock.Anything, fromAddress).Return(uint64(0), nil).Once()
+	ethMock.On("NonceAt", mock.Anything, mock.Anything, mock.Anything).Return(uint64(0), nil)
 
 	app := startNewApplicationV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 		c.EVM[0].Enabled = ptr(true)
@@ -190,7 +190,6 @@ func TestShell_SendEther_From_Txm(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, attempts, 1)
 	assert.Equal(t, attempts[0].Hash, output.Hash)
-
 }
 
 func TestShell_SendEther_From_Txm_WEI(t *testing.T) {
@@ -205,8 +204,7 @@ func TestShell_SendEther_From_Txm_WEI(t *testing.T) {
 	ethMock := newEthMockWithTransactionsOnBlocksAssertions(t)
 
 	ethMock.On("BalanceAt", mock.Anything, key.Address, (*big.Int)(nil)).Return(balance.ToInt(), nil)
-	ethMock.On("SequenceAt", mock.Anything, mock.Anything, mock.Anything).Return(evmtypes.Nonce(0), nil).Maybe()
-	ethMock.On("PendingNonceAt", mock.Anything, fromAddress).Return(uint64(0), nil).Once()
+	ethMock.On("NonceAt", mock.Anything, mock.Anything, mock.Anything).Return(uint64(0), nil)
 
 	app := startNewApplicationV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 		c.EVM[0].Enabled = ptr(true)

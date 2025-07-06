@@ -10,14 +10,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	coscfg "github.com/smartcontractkit/chainlink-cosmos/pkg/cosmos/config"
-	"github.com/smartcontractkit/chainlink-solana/pkg/solana"
-	stkcfg "github.com/smartcontractkit/chainlink-starknet/relayer/pkg/chainlink/config"
-
 	"github.com/smartcontractkit/chainlink-common/pkg/config"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	evmcfg "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
+	solcfg "github.com/smartcontractkit/chainlink-solana/pkg/solana/config"
+
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/config/chaintype"
+	"github.com/smartcontractkit/chainlink-evm/pkg/config/toml"
+	"github.com/smartcontractkit/chainlink-evm/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/config/docs"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink/cfgtest"
@@ -43,16 +42,16 @@ func TestDoc(t *testing.T) {
 	require.NoError(t, cfgtest.DocDefaultsOnly(strings.NewReader(docs.DocsTOML), &defaults, config.DecodeTOML))
 
 	t.Run("EVM", func(t *testing.T) {
-		fallbackDefaults := evmcfg.Defaults(nil)
+		fallbackDefaults := toml.Defaults(nil)
 		docDefaults := defaults.EVM[0].Chain
 
-		require.Equal(t, "", *docDefaults.ChainType)
+		require.Equal(t, chaintype.ChainType(""), docDefaults.ChainType.ChainType())
 		docDefaults.ChainType = nil
 
 		// clean up KeySpecific as a special case
-		require.Equal(t, 1, len(docDefaults.KeySpecific))
-		ks := evmcfg.KeySpecific{Key: new(types.EIP55Address),
-			GasEstimator: evmcfg.KeySpecificGasEstimator{PriceMax: new(assets.Wei)}}
+		require.Len(t, docDefaults.KeySpecific, 1)
+		ks := toml.KeySpecific{Key: new(types.EIP55Address),
+			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: new(assets.Wei)}}
 		require.Equal(t, ks, docDefaults.KeySpecific[0])
 		docDefaults.KeySpecific = nil
 
@@ -67,7 +66,7 @@ func TestDoc(t *testing.T) {
 		require.Zero(t, *docDefaults.GasEstimator.LimitJobType.Keeper)
 		require.Zero(t, *docDefaults.GasEstimator.LimitJobType.VRF)
 		require.Zero(t, *docDefaults.GasEstimator.LimitJobType.FM)
-		docDefaults.GasEstimator.LimitJobType = evmcfg.GasLimitJobType{}
+		docDefaults.GasEstimator.LimitJobType = toml.GasLimitJobType{}
 
 		// EIP1559FeeCapBufferBlocks doesn't have a constant default - it is derived from another field
 		require.Zero(t, *docDefaults.GasEstimator.BlockHistory.EIP1559FeeCapBufferBlocks)
@@ -80,34 +79,40 @@ func TestDoc(t *testing.T) {
 		docDefaults.FlagsContractAddress = nil
 		docDefaults.LinkContractAddress = nil
 		docDefaults.OperatorFactoryAddress = nil
-		require.Empty(t, docDefaults.ChainWriter.FromAddress)
-		require.Empty(t, docDefaults.ChainWriter.ForwarderAddress)
-		docDefaults.ChainWriter.FromAddress = nil
-		docDefaults.ChainWriter.ForwarderAddress = nil
-		docDefaults.NodePool.Errors = evmcfg.ClientErrors{}
+		require.Empty(t, docDefaults.Workflow.FromAddress)
+		require.Empty(t, docDefaults.Workflow.ForwarderAddress)
+		gasLimitDefault := uint64(400_000)
+		require.Equal(t, &gasLimitDefault, docDefaults.Workflow.GasLimitDefault)
+
+		docDefaults.Workflow.FromAddress = nil
+		docDefaults.Workflow.ForwarderAddress = nil
+		docDefaults.Workflow.GasLimitDefault = &gasLimitDefault
+		docDefaults.NodePool.Errors = toml.ClientErrors{}
+
+		// Transactions.AutoPurge configs are only set if the feature is enabled
+		docDefaults.Transactions.AutoPurge.DetectionApiUrl = nil
+		docDefaults.Transactions.AutoPurge.Threshold = nil
+		docDefaults.Transactions.AutoPurge.MinAttempts = nil
+
+		// TransactionManagerV2 configs are only set if the feature is enabled
+		docDefaults.Transactions.TransactionManagerV2.BlockTime = nil
+		docDefaults.Transactions.TransactionManagerV2.CustomURL = nil
+		docDefaults.Transactions.TransactionManagerV2.DualBroadcast = nil
+
+		// Fallback DA oracle is not set
+		docDefaults.GasEstimator.DAOracle = toml.DAOracle{}
+
+		// GasEstimator SendAddress is only set if EstimateLimit is enabled
+		docDefaults.GasEstimator.SenderAddress = nil
 
 		assertTOML(t, fallbackDefaults, docDefaults)
 	})
 
-	t.Run("Cosmos", func(t *testing.T) {
-		var fallbackDefaults coscfg.TOMLConfig
-		fallbackDefaults.SetDefaults()
-
-		assertTOML(t, fallbackDefaults.Chain, defaults.Cosmos[0].Chain)
-	})
-
 	t.Run("Solana", func(t *testing.T) {
-		var fallbackDefaults solana.TOMLConfig
+		var fallbackDefaults solcfg.TOMLConfig
 		fallbackDefaults.SetDefaults()
 
 		assertTOML(t, fallbackDefaults.Chain, defaults.Solana[0].Chain)
-	})
-
-	t.Run("Starknet", func(t *testing.T) {
-		var fallbackDefaults stkcfg.TOMLConfig
-		fallbackDefaults.SetDefaults()
-
-		assertTOML(t, fallbackDefaults.Chain, defaults.Starknet[0].Chain)
 	})
 }
 

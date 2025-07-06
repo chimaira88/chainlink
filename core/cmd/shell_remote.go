@@ -20,8 +20,9 @@ import (
 	"github.com/urfave/cli"
 	"go.uber.org/multierr"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/sessions"
 	"github.com/smartcontractkit/chainlink/v2/core/static"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
@@ -72,7 +73,7 @@ func initRemoteConfigSubCmds(s *Shell) []cli.Command {
 			Name:  "validate",
 			Usage: "DEPRECATED. Use `chainlink node validate`",
 			Before: func(c *cli.Context) error {
-				return s.errorOut(fmt.Errorf("Deprecated, use `chainlink node validate`"))
+				return s.errorOut(errors.New("Deprecated, use `chainlink node validate`"))
 			},
 			Hidden: true,
 		},
@@ -263,7 +264,7 @@ func getTOMLString(s string) (string, error) {
 	if os.IsNotExist(err) {
 		return "", fmt.Errorf("invalid TOML or file not found '%s'", s)
 	} else if err != nil {
-		return "", fmt.Errorf("error reading from file '%s': %v", s, err)
+		return "", fmt.Errorf("error reading from file '%s': %w", s, err)
 	}
 	return buf.String(), nil
 }
@@ -271,7 +272,7 @@ func getTOMLString(s string) (string, error) {
 func (s *Shell) parseResponse(resp *http.Response) ([]byte, error) {
 	b, err := parseResponse(resp)
 	if errors.Is(err, errUnauthorized) {
-		return nil, s.errorOut(multierr.Append(err, fmt.Errorf("your credentials may be missing, invalid or you may need to login first using the CLI via 'chainlink admin login'")))
+		return nil, s.errorOut(multierr.Append(err, errors.New("your credentials may be missing, invalid or you may need to login first using the CLI via 'chainlink admin login'")))
 	}
 
 	if errors.Is(err, errForbidden) {
@@ -407,7 +408,7 @@ func getBufferFromJSON(s string) (*bytes.Buffer, error) {
 	if os.IsNotExist(err) {
 		return nil, fmt.Errorf("invalid JSON or file not found '%s'", s)
 	} else if err != nil {
-		return nil, fmt.Errorf("error reading from file '%s': %v", s, err)
+		return nil, fmt.Errorf("error reading from file '%s': %w", s, err)
 	}
 	return buf, nil
 }
@@ -517,7 +518,11 @@ func (s *Shell) Health(c *cli.Context) error {
 	if c.Bool("json") {
 		mime = gin.MIMEJSON
 	}
-	resp, err := s.HTTP.Get(s.ctx(), "/health", map[string]string{"Accept": mime})
+	u := "/health"
+	if c.Bool("failing") {
+		u += "?failing"
+	}
+	resp, err := s.HTTP.Get(s.ctx(), u, map[string]string{"Accept": mime})
 	if err != nil {
 		return s.errorOut(err)
 	}

@@ -10,14 +10,14 @@ import (
 	"strings"
 	"time"
 
-	automationTypes "github.com/smartcontractkit/chainlink-automation/pkg/v3/types"
-
-	"github.com/smartcontractkit/chainlink-common/pkg/services"
-
 	"github.com/avast/retry-go/v4"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/services"
+
+	automationTypes "github.com/smartcontractkit/chainlink-automation/pkg/v3/types"
+
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/encoding"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/mercury"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/prommetrics"
@@ -74,11 +74,10 @@ func (c *client) DoRequest(ctx context.Context, streamsLookup *mercury.StreamsLo
 		c.multiFeedsRequest(ctx, ch, streamsLookup)
 	})
 
-	// TODO (AUTO 9090): Understand and fix the use of context.Background() here
-	reqTimeoutCtx, cancel := context.WithTimeout(context.Background(), mercury.RequestTimeout)
+	ctx, cancel := context.WithTimeout(ctx, mercury.RequestTimeout)
 	defer cancel()
 	select {
-	case <-reqTimeoutCtx.Done():
+	case <-ctx.Done():
 		// Request Timed out, return timeout error
 		c.lggr.Errorf("at timestamp %s upkeep %s, streams lookup v0.3 timed out", streamsLookup.Time.String(), streamsLookup.UpkeepId.String())
 		return encoding.NoPipelineError, nil, encoding.ErrCodeStreamsTimeout, false, 0 * time.Second, nil
@@ -108,7 +107,7 @@ func (c *client) DoRequest(ctx context.Context, streamsLookup *mercury.StreamsLo
 
 func (c *client) multiFeedsRequest(ctx context.Context, ch chan<- mercury.MercuryData, sl *mercury.StreamsLookup) {
 	// this won't work bc q.Encode() will encode commas as '%2C' but the server is strictly expecting a comma separated list
-	//q := url.Values{
+	// q := url.Values{
 	//	feedIDs:   {strings.Join(sl.Feeds, ",")},
 	//	timestamp: {sl.Time.String()},
 	//}
@@ -182,7 +181,7 @@ func (c *client) multiFeedsRequest(ctx context.Context, ch chan<- mercury.Mercur
 			}
 
 			c.lggr.Infof("at timestamp %s upkeep %s received status code %d from mercury v0.3", sl.Time.String(), sl.UpkeepId.String(), resp.StatusCode)
-			prommetrics.AutomationStreamsResponses.WithLabelValues(prommetrics.StreamsVersion03, fmt.Sprintf("%d", resp.StatusCode)).Inc()
+			prommetrics.AutomationStreamsResponses.WithLabelValues(prommetrics.StreamsVersion03, strconv.Itoa(resp.StatusCode)).Inc()
 			switch resp.StatusCode {
 			case http.StatusUnauthorized:
 				c.lggr.Errorf("at timestamp %s upkeep %s received status code %d from mercury v0.3, most likely this is caused by unauthorized upkeep", sl.Time.String(), sl.UpkeepId.String(), resp.StatusCode)
@@ -279,7 +278,7 @@ func (c *client) multiFeedsRequest(ctx context.Context, ch chan<- mercury.Mercur
 		},
 		// only retry when the error is 206 Partial Content, 404 Not Found, 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
 		retry.RetryIf(func(err error) bool {
-			return err.Error() == fmt.Sprintf("%d", http.StatusPartialContent) || err.Error() == fmt.Sprintf("%d", http.StatusNotFound) || err.Error() == fmt.Sprintf("%d", http.StatusInternalServerError) || err.Error() == fmt.Sprintf("%d", http.StatusBadGateway) || err.Error() == fmt.Sprintf("%d", http.StatusServiceUnavailable) || err.Error() == fmt.Sprintf("%d", http.StatusGatewayTimeout)
+			return err.Error() == strconv.Itoa(http.StatusPartialContent) || err.Error() == strconv.Itoa(http.StatusNotFound) || err.Error() == strconv.Itoa(http.StatusInternalServerError) || err.Error() == strconv.Itoa(http.StatusBadGateway) || err.Error() == strconv.Itoa(http.StatusServiceUnavailable) || err.Error() == strconv.Itoa(http.StatusGatewayTimeout)
 		}),
 		retry.Context(retryCtx),
 		retry.Delay(retryDelay),

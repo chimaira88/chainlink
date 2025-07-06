@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/umbracle/ethgo/abi"
 
-	evmutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
+	evmutils "github.com/smartcontractkit/chainlink-evm/pkg/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
@@ -62,7 +62,8 @@ func TestMercuryConfigPoller(t *testing.T) {
 		100,                  // rMax
 		[]int{len(oracles)},  // S
 		oracles,
-		[]byte{},             // reportingPluginConfig []byte,
+		[]byte{}, // reportingPluginConfig []byte,
+		nil,
 		0,                    // Max duration query
 		250*time.Millisecond, // Max duration observation
 		250*time.Millisecond, // MaxDurationReport
@@ -85,7 +86,7 @@ func TestMercuryConfigPoller(t *testing.T) {
 	require.NoError(t, err, "failed to setConfig with feed ID")
 	th.backend.Commit()
 
-	latest, err := th.backend.BlockByNumber(testutils.Context(t), nil)
+	latest, err := th.backend.Client().BlockByNumber(testutils.Context(t), nil)
 	require.NoError(t, err)
 	// Ensure we capture this config set log.
 	require.NoError(t, th.logPoller.Replay(testutils.Context(t), latest.Number().Int64()-1))

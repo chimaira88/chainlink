@@ -9,12 +9,11 @@ import (
 	"github.com/lib/pq"
 	"github.com/pkg/errors"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/functions/generated/functions_router"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/functions/generated/functions_router"
 )
 
-//go:generate mockery --quiet --name ORM --output ./mocks/ --case=underscore
 type ORM interface {
 	GetSubscriptions(ctx context.Context, offset, limit uint) ([]StoredSubscription, error)
 	UpsertSubscription(ctx context.Context, subscription StoredSubscription) error

@@ -125,6 +125,10 @@ func (c *NodeCoverageHelper) copyCoverageFromNodes(ctx context.Context) error {
 	for i, node := range c.Nodes {
 		wg.Add(1)
 		go func(n tc.Container, id int) {
+			if n == nil {
+				errorsChan <- fmt.Errorf("node %d is nil", id)
+				return
+			}
 			defer wg.Done()
 			finalDestPath := filepath.Join(c.CoverageDir, fmt.Sprintf("node_%d", id))
 			if err := os.MkdirAll(finalDestPath, 0755); err != nil {
@@ -136,7 +140,7 @@ func (c *NodeCoverageHelper) copyCoverageFromNodes(ctx context.Context) error {
 				errorsChan <- fmt.Errorf("failed to copy folder from container for node %d: %w", id, err)
 				return
 			}
-			finalDestPath = filepath.Join(finalDestPath, "go-coverage") // Assuming path structure /var/tmp/go-coverage/TestName/node_X/go-coverage
+			finalDestPath = filepath.Join(finalDestPath, "go-coverage") // Assuming path structure /var/tmp/go-coverage/TestRegex/node_X/go-coverage
 			c.NodeCoverageDirs = append(c.NodeCoverageDirs, finalDestPath)
 		}(node, i)
 	}

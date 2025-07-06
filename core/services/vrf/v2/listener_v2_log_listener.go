@@ -10,10 +10,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"go.uber.org/multierr"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mathutil"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink-evm/pkg/logpoller"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf/vrfcommon"
 )
 
@@ -148,8 +148,8 @@ func (lsn *listenerV2) initializeLastProcessedBlock(ctx context.Context) (lastPr
 		lsn.coordinator.Address(),                   // address
 		1,                                           // topic index
 		[]common.Hash{lsn.job.VRFSpec.PublicKey.MustHash()}, // topic values
-		fromTimestamp,       // from time
-		logpoller.Finalized, // confs
+		fromTimestamp,      // from time
+		evmtypes.Finalized, // confs
 	)
 	if err != nil {
 		return 0, fmt.Errorf("LogPoller.LogsCreatedAfter RandomWordsRequested logs: %w", err)
@@ -162,7 +162,7 @@ func (lsn *listenerV2) initializeLastProcessedBlock(ctx context.Context) (lastPr
 		lsn.coordinator.RandomWordsFulfilledTopic(), // event sig
 		lsn.coordinator.Address(),                   // address
 		fromTimestamp,                               // from time
-		logpoller.Finalized,                         // confs
+		evmtypes.Finalized,                          // confs
 	)
 	if err != nil {
 		return 0, fmt.Errorf("LogPoller.LogsCreatedAfter RandomWordsFulfilled logs: %w", err)

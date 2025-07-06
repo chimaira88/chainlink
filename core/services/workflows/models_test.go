@@ -5,6 +5,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smartcontractkit/chainlink-common/pkg/workflows"
+
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 )
 
 func TestParse_Graph(t *testing.T) {
@@ -19,29 +24,33 @@ func TestParse_Graph(t *testing.T) {
 			name: "basic example",
 			yaml: `
 triggers:
-  - id: "a-trigger"
+  - id: "a-trigger@1.0.0"
+    config: {}
 
 actions:
-  - id: "an-action"
+  - id: "an-action@1.0.0"
+    config: {}
     ref: "an-action"
     inputs:
       trigger_output: $(trigger.outputs)
 
 consensus:
-  - id: "a-consensus"
+  - id: "a-consensus@1.0.0"
+    config: {}
     ref: "a-consensus"
     inputs:
       trigger_output: $(trigger.outputs)
       an-action_output: $(an-action.outputs)
 
 targets:
-  - id: "a-target"
+  - id: "a-target@1.0.0"
+    config: {}
     ref: "a-target"
     inputs: 
       consensus_output: $(a-consensus.outputs)
 `,
 			graph: map[string]map[string]struct{}{
-				keywordTrigger: {
+				workflows.KeywordTrigger: {
 					"an-action":   struct{}{},
 					"a-consensus": struct{}{},
 				},
@@ -58,28 +67,33 @@ targets:
 			name: "circular relationship",
 			yaml: `
 triggers:
-  - id: "a-trigger"
+  - id: "a-trigger@1.0.0"
+    config: {}
 
 actions:
-  - id: "an-action"
+  - id: "an-action@1.0.0"
+    config: {}
     ref: "an-action"
     inputs:
       trigger_output: $(trigger.outputs)
       output: $(a-second-action.outputs)
-  - id: "a-second-action"
+  - id: "a-second-action@1.0.0"
+    config: {}
     ref: "a-second-action"
     inputs:
       output: $(an-action.outputs)
 
 consensus:
-  - id: "a-consensus"
+  - id: "a-consensus@1.0.0"
+    config: {}
     ref: "a-consensus"
     inputs:
       trigger_output: $(trigger.outputs)
       an-action_output: $(an-action.outputs)
 
 targets:
-  - id: "a-target"
+  - id: "a-target@1.0.0"
+    config: {}
     ref: "a-target"
     inputs: 
       consensus_output: $(a-consensus.outputs)
@@ -90,32 +104,38 @@ targets:
 			name: "indirect circular relationship",
 			yaml: `
 triggers:
-  - id: "a-trigger"
+  - id: "a-trigger@1.0.0"
+    config: {}
 
 actions:
-  - id: "an-action"
+  - id: "an-action@1.0.0"
+    config: {}
     ref: "an-action"
     inputs:
       trigger_output: $(trigger.outputs)
       action_output: $(a-third-action.outputs)
-  - id: "a-second-action"
+  - id: "a-second-action@1.0.0"
+    config: {}
     ref: "a-second-action"
     inputs:
       output: $(an-action.outputs)
-  - id: "a-third-action"
+  - id: "a-third-action@1.0.0"
+    config: {}
     ref: "a-third-action"
     inputs:
       output: $(a-second-action.outputs)
 
 consensus:
-  - id: "a-consensus"
+  - id: "a-consensus@1.0.0"
+    config: {}
     ref: "a-consensus"
     inputs:
       trigger_output: $(trigger.outputs)
       an-action_output: $(an-action.outputs)
 
 targets:
-  - id: "a-target"
+  - id: "a-target@1.0.0"
+    config: {}
     ref: "a-target"
     inputs: 
       consensus_output: $(a-consensus.outputs)
@@ -126,23 +146,27 @@ targets:
 			name: "relationship doesn't exist",
 			yaml: `
 triggers:
-  - id: "a-trigger"
+  - id: "a-trigger@1.0.0"
+    config: {}
 
 actions:
-  - id: "an-action"
+  - id: "an-action@1.0.0"
+    config: {}
     ref: "an-action"
     inputs:
       trigger_output: $(trigger.outputs)
       action_output: $(missing-action.outputs)
 
 consensus:
-  - id: "a-consensus"
+  - id: "a-consensus@1.0.0"
+    config: {}
     ref: "a-consensus"
     inputs:
       an-action_output: $(an-action.outputs)
 
 targets:
-  - id: "a-target"
+  - id: "a-target@1.0.0"
+    config: {}
     ref: "a-target"
     inputs: 
       consensus_output: $(a-consensus.outputs)
@@ -153,29 +177,34 @@ targets:
 			name: "two trigger nodes",
 			yaml: `
 triggers:
-  - id: "a-trigger"
-  - id: "a-second-trigger"
+  - id: "a-trigger@1.0.0"
+    config: {}
+  - id: "a-second-trigger@1.0.0"
+    config: {}
 
 actions:
-  - id: "an-action"
+  - id: "an-action@1.0.0"
+    config: {}
     ref: "an-action"
     inputs:
       trigger_output: $(trigger.outputs)
 
 consensus:
-  - id: "a-consensus"
+  - id: "a-consensus@1.0.0"
+    config: {}
     ref: "a-consensus"
     inputs:
       an-action_output: $(an-action.outputs)
 
 targets:
-  - id: "a-target"
+  - id: "a-target@1.0.0"
+    config: {}
     ref: "a-target"
     inputs:
       consensus_output: $(a-consensus.outputs)
 `,
 			graph: map[string]map[string]struct{}{
-				keywordTrigger: {
+				workflows.KeywordTrigger: {
 					"an-action": struct{}{},
 				},
 				"an-action": {
@@ -188,35 +217,86 @@ targets:
 			},
 		},
 		{
-			name: "non-trigger step with no dependent refs",
+			name: "invalid refs",
 			yaml: `
 triggers:
-  - id: "a-trigger"
-  - id: "a-second-trigger"
+  - id: "a-trigger@1.0.0"
+    config: {}
+  - id: "a-second-trigger@1.0.0"
+    config: {}
 actions:
-  - id: "an-action"
+  - id: "an-action@1.0.0"
+    config: {}
     ref: "an-action"
     inputs:
       hello: "world"
 consensus:
-  - id: "a-consensus"
+  - id: "a-consensus@1.0.0"
+    config: {}
     ref: "a-consensus"
     inputs:
       trigger_output: $(trigger.outputs)
       action_output: $(an-action.outputs)
 targets:
-  - id: "a-target"
+  - id: "a-target@1.0.0"
+    config: {}
     ref: "a-target"
     inputs:
       consensus_output: $(a-consensus.outputs)
 `,
-			errMsg: "all non-trigger steps must have a dependent ref",
+			errMsg: "invalid refs",
+		},
+		{
+			name: "duplicate edge declarations",
+			yaml: `
+triggers:
+  - id: "a-trigger@1.0.0"
+    config: {}
+  - id: "a-second-trigger@1.0.0"
+    config: {}
+actions:
+  - id: "an-action@1.0.0"
+    config: {}
+    ref: "an-action"
+    inputs:
+      trigger_output: $(trigger.outputs)
+consensus:
+  - id: "a-consensus@1.0.0"
+    config: {}
+    ref: "a-consensus"
+    inputs:
+      trigger_output: $(trigger.outputs)
+      action_output: $(an-action.outputs)
+targets:
+  - id: "a-target@1.0.0"
+    config: {}
+    ref: "a-target"
+    inputs:
+      consensus_output: $(a-consensus.outputs)
+      consensus_output2: $(a-consensus.outputs)
+`,
+			graph: map[string]map[string]struct{}{
+				workflows.KeywordTrigger: {
+					"an-action":   struct{}{},
+					"a-consensus": struct{}{},
+				},
+				"an-action": {
+					"a-consensus": struct{}{},
+				},
+				"a-consensus": {
+					"a-target": struct{}{},
+				},
+				"a-target": {},
+			},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(st *testing.T) {
-			wf, err := Parse(tc.yaml)
+			spec, _, _, err := job.YAMLSpecFactory{}.Spec(testutils.Context(t), tc.yaml, "")
+			require.NoError(t, err)
+
+			wf, err := Parse(spec)
 			if tc.errMsg != "" {
 				assert.ErrorContains(st, err, tc.errMsg)
 			} else {
@@ -239,4 +319,17 @@ targets:
 			}
 		})
 	}
+}
+
+func TestParsesIntsCorrectly(t *testing.T) {
+	spec, _, _, err := job.YAMLSpecFactory{}.Spec(testutils.Context(t), hardcodedWorkflow, "")
+	require.NoError(t, err)
+
+	wf, err := Parse(spec)
+	require.NoError(t, err)
+
+	n, err := wf.Vertex("evm_median")
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(3600), n.Config["aggregation_config"].(map[string]any)["0x1111111111111111111100000000000000000000000000000000000000000000"].(map[string]any)["heartbeat"])
 }

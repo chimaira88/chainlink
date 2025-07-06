@@ -11,12 +11,12 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/pkg/errors"
 
-	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	registry1_1 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/keeper_registry_wrapper1_1"
-	registry1_2 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/keeper_registry_wrapper1_2"
-	registry1_3 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/keeper_registry_wrapper1_3"
-	type_and_version "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/type_and_version_interface_wrapper"
+	registry1_1 "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/keeper_registry_wrapper1_1"
+	registry1_2 "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/keeper_registry_wrapper1_2"
+	registry1_3 "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/keeper_registry_wrapper1_3"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/shared/generated/type_and_version"
+	evmclient "github.com/smartcontractkit/chainlink-evm/pkg/client"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
 )
 
 type RegistryVersion int32
@@ -61,14 +61,14 @@ type RegistryWrapper struct {
 }
 
 func NewRegistryWrapper(address evmtypes.EIP55Address, evmClient evmclient.Client) (*RegistryWrapper, error) {
-	interface_wrapper, err := type_and_version.NewTypeAndVersionInterface(
+	interfaceWrapper, err := type_and_version.NewITypeAndVersion(
 		address.Address(),
 		evmClient,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to create type and interface wrapper")
 	}
-	version, err := getRegistryVersion(interface_wrapper)
+	version, err := getRegistryVersion(interfaceWrapper)
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to determine version of keeper registry contract")
 	}
@@ -105,7 +105,7 @@ func NewRegistryWrapper(address evmtypes.EIP55Address, evmClient evmclient.Clien
 	}, nil
 }
 
-func getRegistryVersion(contract *type_and_version.TypeAndVersionInterface) (*RegistryVersion, error) {
+func getRegistryVersion(contract *type_and_version.ITypeAndVersion) (*RegistryVersion, error) {
 	typeAndVersion, err := contract.TypeAndVersion(nil)
 	if err != nil {
 		jsonErr := evmclient.ExtractRPCErrorOrNil(err)
@@ -161,11 +161,11 @@ func (rw *RegistryWrapper) getUpkeepCount(opts *bind.CallOpts) (*big.Int, error)
 	}
 }
 
-func (rw *RegistryWrapper) GetActiveUpkeepIDs(opts *bind.CallOpts) ([]*big.Int, error) {
+func (rw *RegistryWrapper) GetActiveUpkeepIDs(ctx context.Context, opts *bind.CallOpts) ([]*big.Int, error) {
 	if opts == nil || opts.BlockNumber.Int64() == 0 {
 		var head *evmtypes.Head
 		// fetch the current block number so batched GetActiveUpkeepIDs calls can be performed on the same block
-		head, err := rw.evmClient.HeadByNumber(context.Background(), nil)
+		head, err := rw.evmClient.HeadByNumber(ctx, nil)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to fetch EVM block header")
 		}

@@ -2,12 +2,14 @@ package p2p
 
 import (
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/smartcontractkit/libocr/networking/ragedisco"
 	nettypes "github.com/smartcontractkit/libocr/networking/types"
 	"github.com/smartcontractkit/libocr/ragep2p"
@@ -16,17 +18,17 @@ import (
 	commonlogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocrcommon"
 	p2ptypes "github.com/smartcontractkit/chainlink/v2/core/services/p2p/types"
 )
 
 var (
-	defaultGroupID    = [32]byte{0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01}
 	defaultStreamName = "stream"
 	defaultRecvChSize = 10000
 )
 
 type PeerConfig struct {
-	PrivateKey ed25519.PrivateKey
+	PrivateKey crypto.Signer
 	// List of <ip>:<port> addresses.
 	ListenAddresses []string
 	// List of <host>:<port> addresses. If empty, defaults to ListenAddresses.
@@ -49,15 +51,16 @@ type peer struct {
 	myID        ragetypes.PeerID
 	recvCh      chan p2ptypes.Message
 
-	stopCh services.StopChan
-	wg     sync.WaitGroup
-	lggr   logger.Logger
+	stopCh  services.StopChan
+	wg      sync.WaitGroup
+	lggr    logger.Logger
+	groupID *counter
 }
 
 var _ p2ptypes.Peer = &peer{}
 
 func NewPeer(cfg PeerConfig, lggr logger.Logger) (*peer, error) {
-	peerID, err := ragetypes.PeerIDFromPrivateKey(cfg.PrivateKey)
+	peerID, err := ragetypes.PeerIDFromPublicKey(cfg.PrivateKey.Public().(ed25519.PublicKey))
 	if err != nil {
 		return nil, fmt.Errorf("error extracting v2 peer ID from private key: %w", err)
 	}
@@ -77,9 +80,14 @@ func NewPeer(cfg PeerConfig, lggr logger.Logger) (*peer, error) {
 	discoverer := ragedisco.NewRagep2pDiscoverer(cfg.DeltaReconcile, announceAddresses, cfg.DiscovererDatabase, cfg.MetricsRegisterer)
 	commonLggr := commonlogger.NewOCRWrapper(lggr, true, func(string) {})
 
+	peerKeyring, err := ocrcommon.NewSignerPeerKeyring(cfg.PrivateKey)
+	if err != nil {
+		return nil, err
+	}
+
 	host, err := ragep2p.NewHost(
 		ragep2p.HostConfig{DurationBetweenDials: cfg.DeltaDial},
-		cfg.PrivateKey,
+		peerKeyring,
 		cfg.ListenAddresses,
 		discoverer,
 		commonLggr,
@@ -99,6 +107,7 @@ func NewPeer(cfg PeerConfig, lggr logger.Logger) (*peer, error) {
 		recvCh:      make(chan p2ptypes.Message, defaultRecvChSize),
 		stopCh:      make(services.StopChan),
 		lggr:        lggr.Named("P2PPeer"),
+		groupID:     &counter{},
 	}, nil
 }
 
@@ -113,18 +122,21 @@ func (p *peer) UpdateConnections(peers map[ragetypes.PeerID]p2ptypes.StreamConfi
 			return err
 		}
 	}
-
-	if err := p.discoverer.RemoveGroup(defaultGroupID); err != nil {
-		p.lggr.Warnw("failed to remove old group", "groupID", defaultGroupID)
-	}
+	// updating the group is a small optimization that avoids reconnecting to existing peers
+	currentGroupID := p.groupID.Bytes()
+	newGroupID := p.groupID.Inc().Bytes()
 	peerIDs := []ragetypes.PeerID{}
 	for pid := range peers {
 		peerIDs = append(peerIDs, pid)
 	}
-	if err := p.discoverer.AddGroup(defaultGroupID, peerIDs, p.cfg.Bootstrappers); err != nil {
-		p.lggr.Warnw("failed to add group", "groupID", defaultGroupID)
+	if err := p.discoverer.AddGroup(newGroupID, peerIDs, p.cfg.Bootstrappers); err != nil {
+		p.lggr.Warnw("failed to add group", "groupID", newGroupID)
 		return err
 	}
+	if err := p.discoverer.RemoveGroup(currentGroupID); err != nil {
+		p.lggr.Warnw("failed to remove old group", "groupID", currentGroupID)
+	}
+
 	return nil
 }
 
@@ -228,5 +240,9 @@ func (p *peer) HealthReport() map[string]error {
 }
 
 func (p *peer) Name() string {
-	return "P2PPeer"
+	return p.lggr.Name()
+}
+
+func (p *peer) IsBootstrap() bool {
+	return p.isBootstrap
 }

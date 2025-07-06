@@ -14,8 +14,10 @@ import (
 	"gopkg.in/guregu/null.v4"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/assets"
+
 	"github.com/smartcontractkit/chainlink/v2/core/auth"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
+	ccip "github.com/smartcontractkit/chainlink/v2/core/capabilities/ccip/validate"
 	"github.com/smartcontractkit/chainlink/v2/core/logger/audit"
 	"github.com/smartcontractkit/chainlink/v2/core/services/blockhashstore"
 	"github.com/smartcontractkit/chainlink/v2/core/services/blockheaderfeeder"
@@ -36,6 +38,8 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/validate"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocrbootstrap"
+	"github.com/smartcontractkit/chainlink/v2/core/services/standardcapabilities"
+	"github.com/smartcontractkit/chainlink/v2/core/services/streams"
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf/vrfcommon"
 	"github.com/smartcontractkit/chainlink/v2/core/services/webhook"
 	"github.com/smartcontractkit/chainlink/v2/core/services/workflows"
@@ -156,6 +160,7 @@ type createFeedsManagerChainConfigInput struct {
 	ChainID              string
 	ChainType            string
 	AccountAddr          string
+	AccountAddrPubKey    *string
 	AdminAddr            string
 	FluxMonitorEnabled   bool
 	OCR1Enabled          bool
@@ -200,6 +205,10 @@ func (r *Resolver) CreateFeedsManagerChainConfig(ctx context.Context, args struc
 		FluxMonitorConfig: feeds.FluxMonitorConfig{
 			Enabled: args.Input.FluxMonitorEnabled,
 		},
+	}
+
+	if args.Input.AccountAddrPubKey != nil {
+		params.AccountAddressPublicKey = null.StringFromPtr(args.Input.AccountAddrPubKey)
 	}
 
 	if args.Input.OCR1Enabled {
@@ -291,6 +300,7 @@ func (r *Resolver) DeleteFeedsManagerChainConfig(ctx context.Context, args struc
 
 type updateFeedsManagerChainConfigInput struct {
 	AccountAddr          string
+	AccountAddrPubKey    *string
 	AdminAddr            string
 	FluxMonitorEnabled   bool
 	OCR1Enabled          bool
@@ -329,6 +339,10 @@ func (r *Resolver) UpdateFeedsManagerChainConfig(ctx context.Context, args struc
 		FluxMonitorConfig: feeds.FluxMonitorConfig{
 			Enabled: args.Input.FluxMonitorEnabled,
 		},
+	}
+
+	if args.Input.AccountAddrPubKey != nil {
+		params.AccountAddressPublicKey = null.StringFromPtr(args.Input.AccountAddrPubKey)
 	}
 
 	if args.Input.OCR1Enabled {
@@ -412,7 +426,7 @@ func (r *Resolver) CreateFeedsManager(ctx context.Context, args struct {
 
 	id, err := feedsService.RegisterManager(ctx, params)
 	if err != nil {
-		if errors.Is(err, feeds.ErrSingleFeedsManager) {
+		if errors.Is(err, feeds.ErrSingleFeedsManager) || errors.Is(err, feeds.ErrDuplicateFeedsManager) {
 			return NewCreateFeedsManagerPayload(nil, err, nil), nil
 		}
 		return nil, err
@@ -556,6 +570,50 @@ func (r *Resolver) UpdateFeedsManager(ctx context.Context, args struct {
 	return NewUpdateFeedsManagerPayload(mgr, nil, nil), nil
 }
 
+func (r *Resolver) EnableFeedsManager(ctx context.Context, args struct {
+	ID graphql.ID
+},
+) (*EnableFeedsManagerPayloadResolver, error) {
+	if err := authenticateUserCanEdit(ctx); err != nil {
+		return nil, err
+	}
+
+	id, err := stringutils.ToInt64(string(args.ID))
+	if err != nil {
+		return nil, err
+	}
+
+	feedsService := r.App.GetFeedsService()
+
+	mgr, err := feedsService.EnableManager(ctx, id)
+
+	mgrj, _ := json.Marshal(mgr)
+	r.App.GetAuditLogger().Audit(audit.FeedsManEnabled, map[string]interface{}{"mgrj": mgrj})
+	return NewEnableFeedsManagerPayload(mgr, err), nil
+}
+
+func (r *Resolver) DisableFeedsManager(ctx context.Context, args struct {
+	ID graphql.ID
+},
+) (*DisableFeedsManagerPayloadResolver, error) {
+	if err := authenticateUserCanEdit(ctx); err != nil {
+		return nil, err
+	}
+
+	id, err := stringutils.ToInt64(string(args.ID))
+	if err != nil {
+		return nil, err
+	}
+
+	feedsService := r.App.GetFeedsService()
+
+	mgr, err := feedsService.DisableManager(ctx, id)
+
+	mgrj, _ := json.Marshal(mgr)
+	r.App.GetAuditLogger().Audit(audit.FeedsManDisabled, map[string]interface{}{"mgrj": mgrj})
+	return NewDisableFeedsManagerPayload(mgr, err), nil
+}
+
 func (r *Resolver) CreateOCRKeyBundle(ctx context.Context) (*CreateOCRKeyBundlePayloadResolver, error) {
 	if err := authenticateUserCanEdit(ctx); err != nil {
 		return nil, err
@@ -620,7 +678,7 @@ func (r *Resolver) DeleteBridge(ctx context.Context, args struct {
 		return nil, err
 	}
 	if len(jobsUsingBridge) > 0 {
-		return NewDeleteBridgePayload(nil, fmt.Errorf("bridge has jobs associated with it")), nil
+		return NewDeleteBridgePayload(nil, errors.New("bridge has jobs associated with it")), nil
 	}
 
 	if err = orm.DeleteBridgeType(ctx, &bt); err != nil {
@@ -1049,7 +1107,13 @@ func (r *Resolver) CreateJob(ctx context.Context, args struct {
 	case job.Gateway:
 		jb, err = gateway.ValidatedGatewaySpec(args.Input.TOML)
 	case job.Workflow:
-		jb, err = workflows.ValidatedWorkflowSpec(args.Input.TOML)
+		jb, err = workflows.ValidatedWorkflowJobSpec(ctx, args.Input.TOML)
+	case job.StandardCapabilities:
+		jb, err = standardcapabilities.ValidatedStandardCapabilitiesSpec(args.Input.TOML)
+	case job.Stream:
+		jb, err = streams.ValidatedStreamSpec(args.Input.TOML)
+	case job.CCIP:
+		jb, err = ccip.ValidatedCCIPSpec(args.Input.TOML)
 	default:
 		return NewCreateJobPayload(r.App, nil, map[string]string{
 			"Job Type": fmt.Sprintf("unknown job type: %s", jbt),

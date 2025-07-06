@@ -11,23 +11,22 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/google/uuid"
-	"github.com/onsi/gomega"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
 	"github.com/jmoiron/sqlx"
 
-	txmgrcommon "github.com/smartcontractkit/chainlink/v2/common/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	evmutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/batch_vrf_coordinator_v2"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_coordinator_v2"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_external_sub_owner_example"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/batch_vrf_coordinator_v2"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrf_coordinator_v2"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrf_external_sub_owner_example"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/config/toml"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	"github.com/smartcontractkit/chainlink-evm/pkg/types"
+	evmutils "github.com/smartcontractkit/chainlink-evm/pkg/utils"
+	txmgrcommon "github.com/smartcontractkit/chainlink-framework/chains/txmgr"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest/heavyweight"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
@@ -37,11 +36,12 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf/vrfcommon"
 	"github.com/smartcontractkit/chainlink/v2/core/testdata/testspecs"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/utils/testutils/heavyweight"
 )
 
 var (
-	coordinatorV2ABI      = evmtypes.MustGetABI(vrf_coordinator_v2.VRFCoordinatorV2ABI)
-	batchCoordinatorV2ABI = evmtypes.MustGetABI(batch_vrf_coordinator_v2.BatchVRFCoordinatorV2ABI)
+	coordinatorV2ABI      = types.MustGetABI(vrf_coordinator_v2.VRFCoordinatorV2ABI)
+	batchCoordinatorV2ABI = types.MustGetABI(batch_vrf_coordinator_v2.BatchVRFCoordinatorV2ABI)
 )
 
 func TestVRFV2Integration_SingleRevertedTxn_ForceFulfillment(t *testing.T) {
@@ -100,7 +100,7 @@ func TestVRFV2Integration_ForceFulfillmentRevertedTxn_Retry(t *testing.T) {
 	waitForForceFulfillment(t, th, req, th.subs[0], true, 2)
 
 	receipts, err := getTxnReceiptDB(th.db, -1)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.Len(t, receipts, 2)
 	require.Equal(t, uint64(0), receipts[0].EVMReceipt.Status)
 	require.Equal(t, uint64(1), receipts[1].EVMReceipt.Status)
@@ -122,7 +122,7 @@ func TestVRFV2Integration_CanceledSubForceFulfillmentRevertedTxn_Retry(t *testin
 	waitForForceFulfillment(t, th, req, th.subs[0], true, 2)
 
 	receipts, err := getTxnReceiptDB(th.db, -1)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.Len(t, receipts, 2)
 	require.Equal(t, uint64(0), receipts[0].EVMReceipt.Status)
 	require.Equal(t, uint64(1), receipts[1].EVMReceipt.Status)
@@ -134,27 +134,27 @@ func TestVRFV2Integration_CanceledSubForceFulfillmentRevertedTxn_Retry(t *testin
 func TestUniqueReqById_NoPendingReceipts(t *testing.T) {
 	revertedForceTxns := []v2.TxnReceiptDB{
 		{RequestID: common.BigToHash(big.NewInt(1)).Hex(),
-			ForceFulfillmentAttempt: 1, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 1, EVMReceipt: types.Receipt{Status: 0}},
 		{RequestID: common.BigToHash(big.NewInt(1)).Hex(),
-			ForceFulfillmentAttempt: 2, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 2, EVMReceipt: types.Receipt{Status: 0}},
 		{RequestID: common.BigToHash(big.NewInt(2)).Hex(),
-			ForceFulfillmentAttempt: 1, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 1, EVMReceipt: types.Receipt{Status: 0}},
 		{RequestID: common.BigToHash(big.NewInt(2)).Hex(),
-			ForceFulfillmentAttempt: 2, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 2, EVMReceipt: types.Receipt{Status: 0}},
 		{RequestID: common.BigToHash(big.NewInt(2)).Hex(),
-			ForceFulfillmentAttempt: 3, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 3, EVMReceipt: types.Receipt{Status: 0}},
 		{RequestID: common.BigToHash(big.NewInt(2)).Hex(),
-			ForceFulfillmentAttempt: 4, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 4, EVMReceipt: types.Receipt{Status: 0}},
 	}
 	allForceTxns := revertedForceTxns
 	res := v2.UniqueByReqID(revertedForceTxns, allForceTxns)
 	require.Len(t, res, 2)
 	for _, r := range res {
 		if r.RequestID == "1" {
-			require.Equal(t, r.ForceFulfillmentAttempt, 2)
+			require.Equal(t, 2, r.ForceFulfillmentAttempt)
 		}
 		if r.RequestID == "2" {
-			require.Equal(t, r.ForceFulfillmentAttempt, 4)
+			require.Equal(t, 4, r.ForceFulfillmentAttempt)
 		}
 	}
 }
@@ -162,17 +162,17 @@ func TestUniqueReqById_NoPendingReceipts(t *testing.T) {
 func TestUniqueReqById_WithPendingReceipts(t *testing.T) {
 	revertedForceTxns := []v2.TxnReceiptDB{
 		{RequestID: common.BigToHash(big.NewInt(1)).Hex(),
-			ForceFulfillmentAttempt: 1, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 1, EVMReceipt: types.Receipt{Status: 0}},
 		{RequestID: common.BigToHash(big.NewInt(1)).Hex(),
-			ForceFulfillmentAttempt: 2, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 2, EVMReceipt: types.Receipt{Status: 0}},
 		{RequestID: common.BigToHash(big.NewInt(2)).Hex(),
-			ForceFulfillmentAttempt: 1, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 1, EVMReceipt: types.Receipt{Status: 0}},
 		{RequestID: common.BigToHash(big.NewInt(2)).Hex(),
-			ForceFulfillmentAttempt: 2, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 2, EVMReceipt: types.Receipt{Status: 0}},
 		{RequestID: common.BigToHash(big.NewInt(2)).Hex(),
-			ForceFulfillmentAttempt: 3, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 3, EVMReceipt: types.Receipt{Status: 0}},
 		{RequestID: common.BigToHash(big.NewInt(2)).Hex(),
-			ForceFulfillmentAttempt: 4, EVMReceipt: evmtypes.Receipt{Status: 0}},
+			ForceFulfillmentAttempt: 4, EVMReceipt: types.Receipt{Status: 0}},
 	}
 	allForceTxns := []v2.TxnReceiptDB{}
 	allForceTxns = append(allForceTxns, revertedForceTxns...)
@@ -182,7 +182,7 @@ func TestUniqueReqById_WithPendingReceipts(t *testing.T) {
 	require.Len(t, res, 1)
 	for _, r := range res {
 		if r.RequestID == "1" {
-			require.Equal(t, r.ForceFulfillmentAttempt, 2)
+			require.Equal(t, 2, r.ForceFulfillmentAttempt)
 		}
 	}
 }
@@ -199,14 +199,14 @@ func waitForForceFulfillment(t *testing.T,
 	requestID := req.requestID
 
 	// Wait for force-fulfillment to be queued.
-	gomega.NewGomegaWithT(t).Eventually(func() bool {
+	require.Eventually(t, func() bool {
 		uni.backend.Commit()
 		commitment, err := coordinator.GetCommitment(nil, requestID)
 		require.NoError(t, err)
 		t.Log("commitment is:", hexutil.Encode(commitment[:]), ", requestID: ", common.BigToHash(requestID).Hex())
 		checkForForceFulfilledEvent(t, th, req, sub, -1)
 		return utils.IsEmpty(commitment[:])
-	}, testutils.WaitTimeout(t), time.Second).Should(gomega.BeTrue())
+	}, testutils.WaitTimeout(t), time.Second)
 
 	// Mine the fulfillment that was queued.
 	mineForceFulfilled(t, requestID, sub.subID, forceFulfilledCount, *uni, th.db)
@@ -251,7 +251,7 @@ func makeVRFReq(t *testing.T, th *revertTxnTH, sub *vrfSub) (req *vrfReq) {
 	callbackGasLimit := uint32(600_000)
 	_, err := th.eoaConsumer.RequestRandomWords(th.uni.neil, sub.subID,
 		callbackGasLimit, uint16(confs), numWords, th.keyHash)
-	require.NoError(t, err, fmt.Sprintf("failed to request randomness from consumer: %v", err))
+	require.NoError(t, err, "failed to request randomness from consumer: %v", err)
 	th.uni.backend.Commit()
 
 	// Generate VRF proof
@@ -279,9 +279,12 @@ func fulfillVRFReq(t *testing.T,
 	require.NoError(t, err)
 
 	ec := th.uni.backend
-	chainID := th.uni.backend.Blockchain().Config().ChainID
-	chain, err := th.app.GetRelayers().LegacyEVMChains().Get(chainID.String())
+	chainID, err := th.uni.backend.Client().ChainID(testutils.Context(t))
 	require.NoError(t, err)
+	chainService, err := th.app.GetRelayers().LegacyEVMChains().Get(chainID.String())
+	require.NoError(t, err)
+	chain, ok := chainService.(legacyevm.Chain)
+	require.True(t, ok)
 
 	metadata := &txmgr.TxMeta{
 		RequestID:     ptr(common.BytesToHash(req.requestID.Bytes())),
@@ -310,7 +313,7 @@ func fulfillVRFReq(t *testing.T,
 	mine(t, req.requestID, big.NewInt(int64(sub.subID)), th.uni.backend, th.db, vrfcommon.V2, th.chainID)
 
 	receipts, err := getTxnReceiptDB(th.db, etx.ID)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.Len(t, receipts, 1)
 	require.Equal(t, uint64(0), receipts[0].EVMReceipt.Status)
 	req.txID = etx.ID
@@ -345,9 +348,12 @@ func fulfilBatchVRFReq(t *testing.T,
 	require.NoError(t, err)
 
 	ec := th.uni.backend
-	chainID := th.uni.backend.Blockchain().Config().ChainID
-	chain, err := th.app.GetRelayers().LegacyEVMChains().Get(chainID.String())
+	chainID, err := th.uni.backend.Client().ChainID(testutils.Context(t))
 	require.NoError(t, err)
+	chainService, err := th.app.GetRelayers().LegacyEVMChains().Get(chainID.String())
+	require.NoError(t, err)
+	chain, ok := chainService.(legacyevm.Chain)
+	require.True(t, ok)
 
 	etx, err := chain.TxManager().CreateTransaction(testutils.Context(t), txmgr.TxRequest{
 		FromAddress:    th.key1.EIP55Address.Address(),
@@ -369,7 +375,7 @@ func fulfilBatchVRFReq(t *testing.T,
 	mineBatch(t, requestIDInts, big.NewInt(int64(sub.subID)), th.uni.backend, th.db, vrfcommon.V2, chainID)
 
 	receipts, err := getTxnReceiptDB(th.db, etx.ID)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.Len(t, receipts, 1)
 	require.Equal(t, uint64(1), receipts[0].EVMReceipt.Status)
 }
@@ -455,7 +461,7 @@ func createVRFJobsNew(
 		vrfKeyIDs = append(vrfKeyIDs, vrfkey.ID())
 	}
 	// Wait until all jobs are active and listening for logs
-	gomega.NewWithT(t).Eventually(func() bool {
+	require.Eventually(t, func() bool {
 		jbs := app.JobSpawner().ActiveJobs()
 		var count int
 		for _, jb := range jbs {
@@ -464,7 +470,7 @@ func createVRFJobsNew(
 			}
 		}
 		return count == len(fromKeys)
-	}, testutils.WaitTimeout(t), 100*time.Millisecond).Should(gomega.BeTrue())
+	}, testutils.WaitTimeout(t), 100*time.Millisecond)
 	// Unfortunately the lb needs heads to be able to backfill logs to new subscribers.
 	// To avoid confirming
 	// TODO: it could just backfill immediately upon receiving a new subscriber? (though would
@@ -481,7 +487,7 @@ func getTxnReceiptDB(db *sqlx.DB, txesID int64) ([]v2.TxnReceiptDB, error) {
 		WITH txes AS (
 			SELECT *
 			FROM evm.txes
-			WHERE (state = 'confirmed' OR state = 'unconfirmed')
+			WHERE (state = 'confirmed' OR state = 'finalized')
 				AND id = $1
 		), attempts AS (
 			SELECT *
@@ -590,12 +596,12 @@ func newRevertTxnTH(t *testing.T,
 	}
 	coordinator := uni.rootContract
 	coordinatorAddress := uni.rootContractAddress
-	th.chainID = th.uni.backend.Blockchain().Config().ChainID
+	th.chainID = config.EVMConfigs()[0].ChainID.ToInt()
 	var err error
 
 	th.eoaConsumerAddr, _, th.eoaConsumer, err = vrf_external_sub_owner_example.DeployVRFExternalSubOwnerExample(
 		uni.neil,
-		uni.backend,
+		uni.backend.Client(),
 		coordinatorAddress,
 		uni.linkContractAddress,
 	)
@@ -687,7 +693,7 @@ func setupSub(t *testing.T, th *revertTxnTH, subID uint64, balance uint64) {
 	consumers := sub.Consumers()
 	require.NoError(t, err, "failed to get subscription with id %d", subID)
 	require.Equal(t, big.NewInt(int64(balance)), sub.Balance())
-	require.Equal(t, 1, len(consumers))
+	require.Len(t, consumers, 1)
 	require.Equal(t, th.eoaConsumerAddr, consumers[0])
 	require.Equal(t, uni.neil.From, sub.Owner())
 }

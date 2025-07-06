@@ -7,10 +7,10 @@ import (
 	"github.com/rs/zerolog"
 
 	commonassets "github.com/smartcontractkit/chainlink-common/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrf_owner"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrfv2plus_wrapper_load_test_consumer"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_owner"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrfv2plus_wrapper_load_test_consumer"
 )
 
 func LogSubDetails(
@@ -36,8 +36,10 @@ func LogRandomnessRequestedEvent(
 	coordinator contracts.Coordinator,
 	randomWordsRequestedEvent *contracts.CoordinatorRandomWordsRequested,
 	isNativeBilling bool,
+	keyNum int,
 ) {
 	l.Info().
+		Int("KeyNum", keyNum).
 		Str("Coordinator", coordinator.Address()).
 		Bool("Native Billing", isNativeBilling).
 		Str("Request ID", randomWordsRequestedEvent.RequestId.String()).
@@ -58,8 +60,10 @@ func LogRandomWordsFulfilledEvent(
 	coordinator contracts.Coordinator,
 	randomWordsFulfilledEvent *contracts.CoordinatorRandomWordsFulfilled,
 	isNativeBilling bool,
+	keyNum int,
 ) {
 	l.Info().
+		Int("KeyNum", keyNum).
 		Bool("Native Billing", isNativeBilling).
 		Str("Coordinator", coordinator.Address()).
 		Str("Total Payment", randomWordsFulfilledEvent.Payment.String()).

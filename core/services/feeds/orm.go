@@ -11,17 +11,21 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
+
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/utils/crypto"
 )
 
-//go:generate mockery --with-expecter=true --quiet --name ORM --output ./mocks/ --case=underscore
-
 type ORM interface {
+	ManagerExists(ctx context.Context, publicKey crypto.PublicKey) (bool, error)
 	CountManagers(ctx context.Context) (int64, error)
 	CreateManager(ctx context.Context, ms *FeedsManager) (int64, error)
 	GetManager(ctx context.Context, id int64) (*FeedsManager, error)
 	ListManagers(ctx context.Context) (mgrs []FeedsManager, err error)
 	ListManagersByIDs(ctx context.Context, ids []int64) ([]FeedsManager, error)
 	UpdateManager(ctx context.Context, mgr FeedsManager) error
+	EnableManager(ctx context.Context, id int64) (*FeedsManager, error)
+	DisableManager(ctx context.Context, id int64) (*FeedsManager, error)
 
 	CreateBatchChainConfig(ctx context.Context, cfgs []ChainConfig) ([]int64, error)
 	CreateChainConfig(ctx context.Context, cfg ChainConfig) (int64, error)
@@ -36,7 +40,6 @@ type ORM interface {
 	DeleteProposal(ctx context.Context, id int64) error
 	GetJobProposal(ctx context.Context, id int64) (*JobProposal, error)
 	GetJobProposalByRemoteUUID(ctx context.Context, uuid uuid.UUID) (*JobProposal, error)
-	ListJobProposals(ctx context.Context) (jps []JobProposal, err error)
 	ListJobProposalsByManagersIDs(ctx context.Context, ids []int64) ([]JobProposal, error)
 	UpdateJobProposalStatus(ctx context.Context, id int64, status JobProposalStatus) error // NEEDED?
 	UpsertJobProposal(ctx context.Context, jp *JobProposal) (int64, error)
@@ -62,20 +65,26 @@ type ORM interface {
 var _ ORM = &orm{}
 
 type orm struct {
-	ds sqlutil.DataSource
+	ds   sqlutil.DataSource
+	lggr logger.Logger
 }
 
-func NewORM(ds sqlutil.DataSource) *orm {
-	return &orm{ds: ds}
+func NewORM(ds sqlutil.DataSource, lggr logger.Logger) *orm {
+	namedLogger := logger.Sugared(lggr.Named("FeedsORM"))
+	return &orm{
+		ds:   ds,
+		lggr: namedLogger,
+	}
 }
 
 func (o *orm) Transact(ctx context.Context, fn func(ORM) error) error {
 	return sqlutil.Transact(ctx, o.WithDataSource, o.ds, nil, fn)
 }
 
-func (o *orm) WithDataSource(ds sqlutil.DataSource) ORM { return &orm{ds} }
+func (o *orm) WithDataSource(ds sqlutil.DataSource) ORM { return &orm{ds: ds, lggr: o.lggr} }
 
 // Count counts the number of feeds manager records.
+// TODO: delete once multiple feeds managers support is released
 func (o *orm) CountManagers(ctx context.Context) (count int64, err error) {
 	stmt := `
 SELECT COUNT(*)
@@ -84,6 +93,21 @@ FROM feeds_managers
 
 	err = o.ds.GetContext(ctx, &count, stmt)
 	return count, errors.Wrap(err, "CountManagers failed")
+}
+
+// ManagerExists checks if a feeds manager exists by public key.
+func (o *orm) ManagerExists(ctx context.Context, publicKey crypto.PublicKey) (bool, error) {
+	stmt := `
+SELECT EXISTS (
+	SELECT 1
+	FROM feeds_managers
+    	WHERE public_key = $1
+);
+	`
+
+	var exists bool
+	err := o.ds.GetContext(ctx, &exists, stmt, publicKey)
+	return exists, errors.Wrap(err, "ManagerExists failed")
 }
 
 // CreateManager creates a feeds manager.
@@ -101,8 +125,8 @@ RETURNING id;
 // CreateChainConfig creates a new chain config.
 func (o *orm) CreateChainConfig(ctx context.Context, cfg ChainConfig) (id int64, err error) {
 	stmt := `
-INSERT INTO feeds_manager_chain_configs (feeds_manager_id, chain_id, chain_type, account_address, admin_address, flux_monitor_config, ocr1_config, ocr2_config, created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
+INSERT INTO feeds_manager_chain_configs (feeds_manager_id, chain_id, chain_type, account_address, account_address_public_key, admin_address, flux_monitor_config, ocr1_config, ocr2_config, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW())
 RETURNING id;
 `
 
@@ -113,6 +137,7 @@ RETURNING id;
 		cfg.ChainID,
 		cfg.ChainType,
 		cfg.AccountAddress,
+		cfg.AccountAddressPublicKey,
 		cfg.AdminAddress,
 		cfg.FluxMonitorConfig,
 		cfg.OCR1Config,
@@ -129,7 +154,7 @@ func (o *orm) CreateBatchChainConfig(ctx context.Context, cfgs []ChainConfig) (i
 	}
 
 	stmt := `
-INSERT INTO feeds_manager_chain_configs (feeds_manager_id, chain_id, chain_type, account_address, admin_address, flux_monitor_config, ocr1_config, ocr2_config, created_at, updated_at)
+INSERT INTO feeds_manager_chain_configs (feeds_manager_id, chain_id, chain_type, account_address, account_address_public_key, admin_address, flux_monitor_config, ocr1_config, ocr2_config, created_at, updated_at)
 VALUES %s
 RETURNING id;
 	`
@@ -141,16 +166,16 @@ RETURNING id;
 
 	for i, cfg := range cfgs {
 		// Generate the placeholders
-		pnumidx := i * 8
+		pnumidx := i * 9
 
-		lo, hi := pnumidx+1, pnumidx+8
+		lo, hi := pnumidx+1, pnumidx+9
 		pnums := make([]any, hi-lo+1)
 		for i := range pnums {
 			pnums[i] = i + lo
 		}
 
 		vStrs = append(vStrs, fmt.Sprintf(
-			"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW(), NOW())", pnums...,
+			"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW(), NOW())", pnums...,
 		))
 
 		// Append the values
@@ -159,6 +184,7 @@ RETURNING id;
 			cfg.ChainID,
 			cfg.ChainType,
 			cfg.AccountAddress,
+			cfg.AccountAddressPublicKey,
 			cfg.AdminAddress,
 			cfg.FluxMonitorConfig,
 			cfg.OCR1Config,
@@ -192,7 +218,7 @@ RETURNING id;
 // GetChainConfig fetches a chain config.
 func (o *orm) GetChainConfig(ctx context.Context, id int64) (*ChainConfig, error) {
 	stmt := `
-SELECT id, feeds_manager_id, chain_id, chain_type, account_address, admin_address, flux_monitor_config, ocr1_config, ocr2_config, created_at, updated_at
+SELECT id, feeds_manager_id, chain_id, chain_type, account_address, account_address_public_key, admin_address, flux_monitor_config, ocr1_config, ocr2_config, created_at, updated_at
 FROM feeds_manager_chain_configs
 WHERE id = $1;
 `
@@ -207,7 +233,7 @@ WHERE id = $1;
 // ids.
 func (o *orm) ListChainConfigsByManagerIDs(ctx context.Context, mgrIDs []int64) ([]ChainConfig, error) {
 	stmt := `
-SELECT id, feeds_manager_id, chain_id, chain_type, account_address, admin_address, flux_monitor_config, ocr1_config, ocr2_config, created_at, updated_at
+SELECT id, feeds_manager_id, chain_id, chain_type, account_address, account_address_public_key, admin_address, flux_monitor_config, ocr1_config, ocr2_config, created_at, updated_at
 FROM feeds_manager_chain_configs
 WHERE feeds_manager_id = ANY($1)
 	`
@@ -227,8 +253,9 @@ SET account_address = $1,
 	flux_monitor_config = $3,
 	ocr1_config = $4,
 	ocr2_config = $5,
+	account_address_public_key = $6,
 	updated_at = NOW()
-WHERE id = $6
+WHERE id = $7
 RETURNING id;
 `
 
@@ -239,6 +266,7 @@ RETURNING id;
 		cfg.FluxMonitorConfig,
 		cfg.OCR1Config,
 		cfg.OCR2Config,
+		cfg.AccountAddressPublicKey,
 		cfg.ID,
 	)
 
@@ -248,7 +276,7 @@ RETURNING id;
 // GetManager gets a feeds manager by id.
 func (o *orm) GetManager(ctx context.Context, id int64) (mgr *FeedsManager, err error) {
 	stmt := `
-SELECT id, name, uri, public_key, created_at, updated_at
+SELECT id, name, uri, public_key, created_at, updated_at, disabled_at
 FROM feeds_managers
 WHERE id = $1
 `
@@ -261,8 +289,9 @@ WHERE id = $1
 // ListManager lists all feeds managers.
 func (o *orm) ListManagers(ctx context.Context) (mgrs []FeedsManager, err error) {
 	stmt := `
-SELECT id, name, uri, public_key, created_at, updated_at
-FROM feeds_managers;
+SELECT id, name, uri, public_key, created_at, updated_at, disabled_at
+FROM feeds_managers
+ORDER BY created_at;
 `
 
 	err = o.ds.SelectContext(ctx, &mgrs, stmt)
@@ -272,7 +301,7 @@ FROM feeds_managers;
 // ListManagersByIDs gets feeds managers by ids.
 func (o *orm) ListManagersByIDs(ctx context.Context, ids []int64) (managers []FeedsManager, err error) {
 	stmt := `
-SELECT id, name, uri, public_key, created_at, updated_at
+SELECT id, name, uri, public_key, created_at, updated_at, disabled_at
 FROM feeds_managers
 WHERE id = ANY($1)
 ORDER BY created_at, id;`
@@ -303,6 +332,36 @@ WHERE id = $4;
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+func (o *orm) EnableManager(ctx context.Context, id int64) (*FeedsManager, error) {
+	stmt := `
+		UPDATE feeds_managers
+		SET disabled_at = NULL
+		WHERE id = $1
+		RETURNING *;
+`
+	mgr := new(FeedsManager)
+	err := o.ds.GetContext(ctx, mgr, stmt, id)
+	if err != nil {
+		return nil, errors.Wrap(err, "EnableManager failed")
+	}
+	return mgr, nil
+}
+
+func (o *orm) DisableManager(ctx context.Context, id int64) (*FeedsManager, error) {
+	stmt := `
+		UPDATE feeds_managers
+		SET disabled_at = NOW()
+		WHERE id = $1
+		RETURNING *;
+`
+	mgr := new(FeedsManager)
+	err := o.ds.GetContext(ctx, mgr, stmt, id)
+	if err != nil {
+		return nil, errors.Wrap(err, "DisableManager failed")
+	}
+	return mgr, nil
 }
 
 // CreateJobProposal creates a job proposal.
@@ -366,20 +425,10 @@ WHERE remote_uuid = $1
 AND status <> $2;
 `
 
+	o.lggr.Infow("getting job proposal by remote uuid", "remoteUUID", id)
 	jp = new(JobProposal)
 	err = o.ds.GetContext(ctx, jp, stmt, id, JobProposalStatusDeleted)
 	return jp, errors.Wrap(err, "GetJobProposalByRemoteUUID failed")
-}
-
-// ListJobProposals lists all job proposals.
-func (o *orm) ListJobProposals(ctx context.Context) (jps []JobProposal, err error) {
-	stmt := `
-SELECT *
-FROM job_proposals;
-`
-
-	err = o.ds.SelectContext(ctx, &jps, stmt)
-	return jps, errors.Wrap(err, "ListJobProposals failed")
 }
 
 // ListJobProposalsByManagersIDs gets job proposals by feeds managers IDs.
@@ -505,6 +554,7 @@ WHERE id = $2
 RETURNING job_proposal_id;
 `
 
+	o.lggr.Infow("cancelling job proposal spec", "specID", id)
 	var jpID int64
 	if err := o.ds.GetContext(ctx, &jpID, stmt, SpecStatusCancelled, id); err != nil {
 		return err
@@ -523,6 +573,7 @@ SET status = (
 	updated_at = NOW()
 WHERE id = $1;
 `
+	o.lggr.Infow("updating job proposal after spec cancellation", "jobProposalID", jpID)
 	result, err := o.ds.ExecContext(ctx, stmt, jpID, nil)
 	if err != nil {
 		return err
@@ -583,6 +634,7 @@ WHERE (job_proposal_id, version) IN
 AND job_proposal_id = $1
 `
 
+	o.lggr.Infow("getting latest spec for job proposal", "jobProposalID", id)
 	var spec JobProposalSpec
 	err := o.ds.GetContext(ctx, &spec, stmt, id)
 	if err != nil {
@@ -600,6 +652,7 @@ SET status = $1,
 WHERE id = $2;
 `
 
+	o.lggr.Infow("deleting job proposal", "id", id, "pendingUpdate", pendingUpdate)
 	result, err := o.ds.ExecContext(ctx, stmt, JobProposalStatusDeleted, id, pendingUpdate)
 	if err != nil {
 		return err
@@ -638,6 +691,7 @@ WHERE status = $1
 AND job_proposal_id = $2
 `
 
+	o.lggr.Infow("getting approved spec for job proposal", "jobProposalID", jpID)
 	var spec JobProposalSpec
 	err := o.ds.GetContext(ctx, &spec, stmt, SpecStatusApproved, jpID)
 
@@ -817,6 +871,7 @@ SELECT exists (
 	FROM job_proposals
 	INNER JOIN jobs ON job_proposals.external_job_id = jobs.external_job_id
 	WHERE jobs.id = $1
+	AND job_proposals.status <> 'deleted'
 );
 `
 

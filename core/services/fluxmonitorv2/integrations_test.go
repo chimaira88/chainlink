@@ -16,9 +16,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind/backends"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
@@ -26,16 +25,18 @@ import (
 
 	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
+	"github.com/smartcontractkit/chainlink-common/pkg/utils/tests"
+
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/flags_wrapper"
+	faw "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/flux_aggregator_wrapper"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/link_token_interface"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/log"
+	evmtestutils "github.com/smartcontractkit/chainlink-evm/pkg/testutils"
+	"github.com/smartcontractkit/chainlink-evm/pkg/types"
+	evmutils "github.com/smartcontractkit/chainlink-evm/pkg/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/log"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	evmutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/flags_wrapper"
-	faw "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/flux_aggregator_wrapper"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/link_token_interface"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest/heavyweight"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
@@ -45,6 +46,7 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/utils/testutils/heavyweight"
 	"github.com/smartcontractkit/chainlink/v2/core/web"
 )
 
@@ -55,8 +57,9 @@ const fee = int64(100) // Amount paid by FA contract, in LINK-wei
 const faTimeout = uint32(1)
 
 var pollTimerPeriod = 200 * time.Millisecond // if failing due to timeouts, increase this
-var oneEth = big.NewInt(1000000000000000000)
 var emptyList = []common.Address{}
+
+func oneEth() *big.Int { return big.NewInt(1000000000000000000) }
 
 // fluxAggregatorUniverse represents the universe with which the aggregator
 // contract interacts
@@ -69,7 +72,7 @@ type fluxAggregatorUniverse struct {
 	flagsContractAddress      common.Address
 	evmChainID                big.Int
 	// Abstraction representation of the ethereum blockchain
-	backend       *backends.SimulatedBackend
+	backend       types.Backend
 	aggregatorABI abi.ABI
 	// Cast of participants
 	sergey  *bind.TransactOpts // Owns all the LINK initially
@@ -94,7 +97,7 @@ func WithMinMaxSubmission(min, max *big.Int) func(cfg *fluxAggregatorUniverseCon
 // arguments match the arguments of the same name in the FluxAggregator
 // constructor.
 func setupFluxAggregatorUniverse(t *testing.T, configOptions ...func(cfg *fluxAggregatorUniverseConfig)) fluxAggregatorUniverse {
-	testutils.SkipShort(t, "VRFCoordinatorV2Universe")
+	tests.SkipShort(t, "VRFCoordinatorV2Universe")
 	cfg := &fluxAggregatorUniverseConfig{
 		MinSubmission: big.NewInt(0),
 		MaxSubmission: big.NewInt(100000000000),
@@ -106,33 +109,35 @@ func setupFluxAggregatorUniverse(t *testing.T, configOptions ...func(cfg *fluxAg
 
 	key, err := ethkey.NewV2()
 	require.NoError(t, err)
-	oracleTransactor, err := bind.NewKeyedTransactorWithChainID(key.ToEcdsaPrivKey(), testutils.SimulatedChainID)
-	require.NoError(t, err)
+	oracleTransactor := &bind.TransactOpts{
+		From:   key.Address,
+		Signer: key.SignerFn(testutils.SimulatedChainID),
+	}
 
 	var f fluxAggregatorUniverse
 	f.evmChainID = *testutils.SimulatedChainID
 	f.key = key
-	f.sergey = testutils.MustNewSimTransactor(t)
-	f.neil = testutils.MustNewSimTransactor(t)
-	f.ned = testutils.MustNewSimTransactor(t)
+	f.sergey = evmtestutils.MustNewSimTransactor(t)
+	f.neil = evmtestutils.MustNewSimTransactor(t)
+	f.ned = evmtestutils.MustNewSimTransactor(t)
 	f.nallory = oracleTransactor
-	genesisData := core.GenesisAlloc{
+	genesisData := gethtypes.GenesisAlloc{
 		f.sergey.From:  {Balance: assets.Ether(1000).ToInt()},
 		f.neil.From:    {Balance: assets.Ether(1000).ToInt()},
 		f.ned.From:     {Balance: assets.Ether(1000).ToInt()},
 		f.nallory.From: {Balance: assets.Ether(1000).ToInt()},
 	}
-	gasLimit := uint32(ethconfig.Defaults.Miner.GasCeil * 2)
+	gasLimit := ethconfig.Defaults.Miner.GasCeil * 2
 	f.backend = cltest.NewSimulatedBackend(t, genesisData, gasLimit)
 
 	f.aggregatorABI, err = abi.JSON(strings.NewReader(faw.FluxAggregatorABI))
 	require.NoError(t, err, "could not parse FluxAggregator ABI")
 
 	var linkAddress common.Address
-	linkAddress, _, f.linkContract, err = link_token_interface.DeployLinkToken(f.sergey, f.backend)
+	linkAddress, _, f.linkContract, err = link_token_interface.DeployLinkToken(f.sergey, f.backend.Client())
 	require.NoError(t, err, "failed to deploy link contract to simulated ethereum blockchain")
 
-	f.flagsContractAddress, _, f.flagsContract, err = flags_wrapper.DeployFlags(f.sergey, f.backend, f.sergey.From)
+	f.flagsContractAddress, _, f.flagsContract, err = flags_wrapper.DeployFlags(f.sergey, f.backend.Client(), f.sergey.From)
 	require.NoError(t, err, "failed to deploy flags contract to simulated ethereum blockchain")
 
 	f.backend.Commit()
@@ -144,10 +149,10 @@ func setupFluxAggregatorUniverse(t *testing.T, configOptions ...func(cfg *fluxAg
 	waitTimeMs := int64(faTimeout * 5000)
 	time.Sleep(time.Duration((waitTimeMs + waitTimeMs/20) * int64(time.Millisecond)))
 	oldGasLimit := f.sergey.GasLimit
-	f.sergey.GasLimit = uint64(gasLimit)
+	f.sergey.GasLimit = gasLimit
 	f.aggregatorContractAddress, _, f.aggregatorContract, err = faw.DeployFluxAggregator(
 		f.sergey,
-		f.backend,
+		f.backend.Client(),
 		linkAddress,
 		big.NewInt(fee),
 		faTimeout,
@@ -162,8 +167,9 @@ func setupFluxAggregatorUniverse(t *testing.T, configOptions ...func(cfg *fluxAg
 
 	f.sergey.GasLimit = oldGasLimit
 
-	_, err = f.linkContract.Transfer(f.sergey, f.aggregatorContractAddress, oneEth) // Actually, LINK
+	_, err = f.linkContract.Transfer(f.sergey, f.aggregatorContractAddress, oneEth()) // Actually, LINK
 	require.NoError(t, err, "failed to fund FluxAggregator contract with LINK")
+	f.backend.Commit()
 
 	_, err = f.aggregatorContract.UpdateAvailableFunds(f.sergey)
 	require.NoError(t, err, "failed to update aggregator's availableFunds field")
@@ -171,9 +177,9 @@ func setupFluxAggregatorUniverse(t *testing.T, configOptions ...func(cfg *fluxAg
 	f.backend.Commit()
 	availableFunds, err := f.aggregatorContract.AvailableFunds(nil)
 	require.NoError(t, err, "failed to retrieve AvailableFunds")
-	require.Equal(t, availableFunds, oneEth)
+	require.Equal(t, availableFunds, oneEth())
 
-	ilogs, err := f.aggregatorContract.FilterAvailableFundsUpdated(nil, []*big.Int{oneEth})
+	ilogs, err := f.aggregatorContract.FilterAvailableFundsUpdated(nil, []*big.Int{oneEth()})
 	require.NoError(t, err, "failed to gather AvailableFundsUpdated logs")
 
 	logs := cltest.GetLogs(t, nil, ilogs)
@@ -251,7 +257,9 @@ type answerParams struct {
 func checkSubmission(t *testing.T, p answerParams, currentBalance int64, receiptBlock uint64) {
 	t.Helper()
 	if receiptBlock == 0 {
-		receiptBlock = p.fa.backend.Blockchain().CurrentBlock().Number.Uint64()
+		h, err := p.fa.backend.Client().HeaderByNumber(testutils.Context(t), nil)
+		require.NoError(t, err)
+		receiptBlock = h.Number.Uint64()
 	}
 	blockRange := &bind.FilterOpts{Start: 0, End: &receiptBlock}
 
@@ -282,7 +290,7 @@ func checkSubmission(t *testing.T, p answerParams, currentBalance int64, receipt
 		require.Len(t, nrlogs, 1, "FluxAggregator did not emit correct NewRound "+
 			"log")
 	} else {
-		assert.Len(t, cltest.GetLogs(t, nil, inrlogs), 0, "FluxAggregator emitted "+
+		assert.Empty(t, cltest.GetLogs(t, nil, inrlogs), "FluxAggregator emitted "+
 			"unexpected NewRound log")
 	}
 
@@ -353,7 +361,7 @@ func submitAnswer(t *testing.T, p answerParams) {
 	checkSubmission(t, p, cb.Int64(), 0)
 }
 
-func awaitSubmission(t *testing.T, backend *backends.SimulatedBackend, submissionReceived chan *faw.FluxAggregatorSubmissionReceived) (
+func awaitSubmission(t *testing.T, backend types.Backend, submissionReceived chan *faw.FluxAggregatorSubmissionReceived) (
 	receiptBlock uint64, answer int64,
 ) {
 	t.Helper()
@@ -376,7 +384,6 @@ func assertNoSubmission(t *testing.T,
 	duration time.Duration,
 	msg string,
 ) {
-
 	// drain the channel
 	for len(submissionReceived) > 0 {
 		<-submissionReceived
@@ -415,7 +422,8 @@ func checkLogWasConsumed(t *testing.T, fa fluxAggregatorUniverse, ds sqlutil.Dat
 	g := gomega.NewWithT(t)
 	g.Eventually(func() bool {
 		ctx := testutils.Context(t)
-		block := fa.backend.Blockchain().GetBlockByNumber(blockNumber)
+		block, err := fa.backend.Client().BlockByNumber(ctx, new(big.Int).SetUint64(blockNumber))
+		require.NoError(t, err)
 		require.NotNil(t, block)
 		orm := log.NewORM(ds, fa.evmChainID)
 		consumed, err := orm.WasBroadcastConsumed(ctx, block.Hash(), 0, pipelineSpecID)
@@ -602,8 +610,8 @@ func TestFluxMonitor_Deviation(t *testing.T) {
 			expMetaMu.Lock()
 			defer expMetaMu.Unlock()
 			assert.Len(t, expectedMeta, 2, "expected metadata %v", expectedMeta)
-			assert.Greater(t, expectedMeta["100"].count, 0, "Stored answer metadata does not contain 100 but contains: %v", expectedMeta)
-			assert.Greater(t, expectedMeta["103"].count, 0, "Stored answer metadata does not contain 103 but contains: %v", expectedMeta)
+			assert.Positive(t, expectedMeta["100"].count, "Stored answer metadata does not contain 100 but contains: %v", expectedMeta)
+			assert.Positive(t, expectedMeta["103"].count, "Stored answer metadata does not contain 103 but contains: %v", expectedMeta)
 			assert.Greater(t, expectedMeta["103"].updatedAt, expectedMeta["100"].updatedAt)
 		})
 	}
@@ -903,7 +911,7 @@ ds1 -> ds1_parse
 
 	j := cltest.CreateJobViaWeb2(t, app, string(requestBody))
 
-	closer := cltest.Mine(fa.backend, 500*time.Millisecond)
+	_, closer := cltest.Mine(fa.backend, 500*time.Millisecond)
 	defer closer()
 
 	// We should see a spec error because the value is too large to submit on-chain.
@@ -1067,7 +1075,7 @@ ds1 -> ds1_parse -> ds1_multiply
 	assert.Error(t, err, "FA allowed chainlink node to start a new round early")
 
 	//- finally, ensure it can start a legitimate round after restartDelay is
-	//reached start an intervening round
+	// reached start an intervening round
 	submitAnswer(t, answerParams{fa: &fa, roundId: newRound,
 		answer: processedAnswer, from: fa.ned, isNewRound: true,
 		completesAnswer: false})

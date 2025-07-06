@@ -1,24 +1,25 @@
 package smoke
 
 import (
-	"fmt"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/smartcontractkit/chainlink/integration-tests/utils"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/chainlink-testing-framework/logging"
-	"github.com/smartcontractkit/chainlink-testing-framework/networks"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils/testcontext"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/logging"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/utils/testcontext"
+	"github.com/smartcontractkit/chainlink-testing-framework/parrot"
 
+	"github.com/smartcontractkit/chainlink/deployment/environment/nodeclient"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
-	actions_seth "github.com/smartcontractkit/chainlink/integration-tests/actions/seth"
-	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
 	"github.com/smartcontractkit/chainlink/integration-tests/docker/test_env"
 	tc "github.com/smartcontractkit/chainlink/integration-tests/testconfig"
@@ -28,10 +29,8 @@ func TestFluxBasic(t *testing.T) {
 	t.Parallel()
 	l := logging.GetTestLogger(t)
 
-	config, err := tc.GetConfig("Smoke", tc.Flux)
-	if err != nil {
-		t.Fatal(err)
-	}
+	config, err := tc.GetConfig([]string{"Smoke"}, tc.Flux)
+	require.NoError(t, err, "Error getting config")
 
 	privateNetwork, err := actions.EthereumNetworkConfigFromConfig(l, &config)
 	require.NoError(t, err, "Error building ethereum network config")
@@ -39,25 +38,32 @@ func TestFluxBasic(t *testing.T) {
 	env, err := test_env.NewCLTestEnvBuilder().
 		WithTestInstance(t).
 		WithTestConfig(&config).
-		WithPrivateEthereumNetwork(privateNetwork).
+		WithPrivateEthereumNetwork(privateNetwork.EthereumNetworkConfig).
 		WithMockAdapter().
 		WithCLNodes(3).
 		WithStandardCleanup().
-		WithSeth().
 		Build()
 	require.NoError(t, err)
 
 	nodeAddresses, err := env.ClCluster.NodeAddresses()
 	require.NoError(t, err, "Retrieving on-chain wallet addresses for chainlink nodes shouldn't fail")
 
-	network := networks.MustGetSelectedNetworkConfig(config.GetNetworkConfig())[0]
-	sethClient, err := env.GetSethClient(network.ChainID)
+	evmNetwork, err := env.GetFirstEvmNetwork()
+	require.NoError(t, err, "Error getting first evm network")
+
+	sethClient, err := utils.TestAwareSethClient(t, config, evmNetwork)
 	require.NoError(t, err, "Error getting seth client")
 
 	adapterUUID := uuid.NewString()
-	adapterPath := fmt.Sprintf("/variable-%s", adapterUUID)
-	err = env.MockAdapter.SetAdapterBasedIntValuePath(adapterPath, []string{http.MethodPost}, 1e5)
-	require.NoError(t, err, "Setting mock adapter value path shouldn't fail")
+	adapterPath := "/variable-" + adapterUUID
+	route := &parrot.Route{
+		Method:             http.MethodPost,
+		Path:               adapterPath,
+		ResponseBody:       1e5,
+		ResponseStatusCode: http.StatusOK,
+	}
+	err = env.MockAdapter.SetAdapterRoute(route)
+	require.NoError(t, err, "Failed to set route in mock adapter")
 
 	lt, err := contracts.DeployLinkTokenContract(l, sethClient)
 	require.NoError(t, err, "Deploying Link Token Contract shouldn't fail")
@@ -71,8 +77,13 @@ func TestFluxBasic(t *testing.T) {
 	err = fluxInstance.UpdateAvailableFunds()
 	require.NoError(t, err, "Updating the available funds on the Flux Aggregator Contract shouldn't fail")
 
-	err = env.FundChainlinkNodes(big.NewFloat(1))
+	err = actions.FundChainlinkNodesFromRootAddress(l, sethClient, contracts.ChainlinkClientToChainlinkNodeWithKeysAndAddress(env.ClCluster.NodeAPIs()), big.NewFloat(*config.Common.ChainlinkNodeFunding))
 	require.NoError(t, err, "Failed to fund the nodes")
+
+	t.Cleanup(func() {
+		// ignore error, we will see failures in the logs anyway
+		_ = actions.ReturnFundsFromNodes(l, sethClient, contracts.ChainlinkClientToChainlinkNodeWithKeysAndAddress(env.ClCluster.NodeAPIs()))
+	})
 
 	err = fluxInstance.SetOracles(
 		contracts.FluxAggregatorSetOraclesOptions{
@@ -89,25 +100,25 @@ func TestFluxBasic(t *testing.T) {
 	require.NoError(t, err, "Getting oracle details from the Flux aggregator contract shouldn't fail")
 	l.Info().Str("Oracles", strings.Join(oracles, ",")).Msg("Oracles set")
 
-	adapterFullURL := fmt.Sprintf("%s%s", env.MockAdapter.InternalEndpoint, adapterPath)
+	adapterFullURL := env.MockAdapter.InternalEndpoint + adapterPath
 	l.Info().Str("AdapterFullURL", adapterFullURL).Send()
-	bta := &client.BridgeTypeAttributes{
-		Name: fmt.Sprintf("variable-%s", adapterUUID),
+	bta := &nodeclient.BridgeTypeAttributes{
+		Name: "variable-" + adapterUUID,
 		URL:  adapterFullURL,
 	}
 	for i, n := range env.ClCluster.Nodes {
 		err = n.API.MustCreateBridge(bta)
 		require.NoError(t, err, "Creating bridge shouldn't fail for node %d", i+1)
 
-		fluxSpec := &client.FluxMonitorJobSpec{
-			Name:              fmt.Sprintf("flux-monitor-%s", adapterUUID),
+		fluxSpec := &nodeclient.FluxMonitorJobSpec{
+			Name:              "flux-monitor-" + adapterUUID,
 			ContractAddress:   fluxInstance.Address(),
-			EVMChainID:        fmt.Sprint(sethClient.ChainID),
+			EVMChainID:        strconv.FormatInt(sethClient.ChainID, 10),
 			Threshold:         0,
 			AbsoluteThreshold: 0,
 			PollTimerPeriod:   15 * time.Second, // min 15s
 			IdleTimerDisabled: true,
-			ObservationSource: client.ObservationSourceSpecBridge(bta),
+			ObservationSource: nodeclient.ObservationSourceSpecBridge(bta),
 		}
 		_, err = n.API.MustCreateJob(fluxSpec)
 		require.NoError(t, err, "Creating flux job shouldn't fail for node %d", i+1)
@@ -115,7 +126,7 @@ func TestFluxBasic(t *testing.T) {
 
 	// initial value set is performed before jobs creation
 	fluxRoundTimeout := 1 * time.Minute
-	err = actions_seth.WatchNewFluxRound(l, sethClient, 1, fluxInstance, fluxRoundTimeout)
+	err = actions.WatchNewFluxRound(l, sethClient, 1, fluxInstance, fluxRoundTimeout)
 	require.NoError(t, err, "Waiting for event subscriptions in nodes shouldn't fail")
 	data, err := fluxInstance.GetContractData(testcontext.Get(t))
 	require.NoError(t, err, "Getting contract data from flux aggregator contract shouldn't fail")
@@ -130,9 +141,11 @@ func TestFluxBasic(t *testing.T) {
 	require.Equal(t, int64(3), data.AllocatedFunds.Int64(),
 		"Expected allocated funds to be %d, but found %d", int64(3), data.AllocatedFunds.Int64())
 
-	err = env.MockAdapter.SetAdapterBasedIntValuePath(adapterPath, []string{http.MethodPost}, 1e10)
-	require.NoError(t, err, "Setting value path in mock server shouldn't fail")
-	err = actions_seth.WatchNewFluxRound(l, sethClient, 2, fluxInstance, fluxRoundTimeout)
+	route.ResponseBody = 1e10
+	err = env.MockAdapter.SetAdapterRoute(route)
+	require.NoError(t, err, "Failed to set route in mock adapter")
+
+	err = actions.WatchNewFluxRound(l, sethClient, 2, fluxInstance, fluxRoundTimeout)
 	require.NoError(t, err, "Waiting for event subscriptions in nodes shouldn't fail")
 	data, err = fluxInstance.GetContractData(testcontext.Get(t))
 	require.NoError(t, err, "Getting contract data from flux aggregator contract shouldn't fail")

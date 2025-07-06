@@ -11,22 +11,20 @@ const PeerIDLength = 32
 
 type PeerID = ragetypes.PeerID
 
-//go:generate mockery --quiet --name Peer --output ./mocks/ --case=underscore
 type Peer interface {
 	services.Service
 	ID() PeerID
 	UpdateConnections(peers map[PeerID]StreamConfig) error
 	Send(peerID PeerID, msg []byte) error
 	Receive() <-chan Message
+	IsBootstrap() bool
 }
 
-//go:generate mockery --quiet --name PeerWrapper --output ./mocks/ --case=underscore
 type PeerWrapper interface {
 	services.Service
 	GetPeer() Peer
 }
 
-//go:generate mockery --quiet --name Signer --output ./mocks/ --case=underscore
 type Signer interface {
 	Sign(data []byte) ([]byte, error)
 }

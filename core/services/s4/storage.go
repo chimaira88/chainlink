@@ -7,7 +7,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
@@ -43,8 +43,6 @@ type Metadata struct {
 	// Signature contains the original user signature.
 	Signature []byte
 }
-
-//go:generate mockery --quiet --name Storage --output ./mocks/ --case=underscore
 
 // Storage represents S4 storage access interface.
 // All functions are thread-safe.

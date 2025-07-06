@@ -53,6 +53,7 @@ func ISO8601UTC(t time.Time) string {
 
 // DurationFromNow returns the amount of time since the Time
 // field was last updated.
+// Deprecated: Use [time.Until].
 func DurationFromNow(t time.Time) time.Duration {
 	return time.Until(t)
 }
@@ -157,7 +158,7 @@ func ContextFromChan(chStop chan struct{}) (context.Context, context.CancelFunc)
 // ContextFromChanWithTimeout creates a context with a timeout that finishes when the provided channel receives or is closed.
 // Deprecated: Call [services.StopChan.CtxCancel] directly
 func ContextFromChanWithTimeout(chStop chan struct{}, timeout time.Duration) (context.Context, context.CancelFunc) {
-	return services.StopChan(chStop).CtxCancel(context.WithTimeout(context.Background(), timeout))
+	return services.StopChan(chStop).CtxWithTimeout(timeout)
 }
 
 // Deprecated: use services.StopChan
@@ -479,7 +480,23 @@ func NewRedialBackoff() backoff.Backoff {
 		Max:    15 * time.Second,
 		Jitter: true,
 	}
+}
 
+func NewHTTPFetchBackoff() backoff.Backoff {
+	return backoff.Backoff{
+		Min:    100 * time.Millisecond,
+		Max:    15 * time.Second,
+		Jitter: true,
+	}
+}
+
+// NewDBBackoff is a standard backoff to use for database connection issues
+func NewDBBackoff() backoff.Backoff {
+	return backoff.Backoff{
+		Min:    100 * time.Millisecond,
+		Max:    5 * time.Second,
+		Jitter: true,
+	}
 }
 
 // KeyedMutex allows to lock based on particular values
@@ -494,34 +511,6 @@ func (m *KeyedMutex) LockInt64(key int64) func() {
 	mtx.Lock()
 
 	return mtx.Unlock
-}
-
-// BoxOutput formats its arguments as fmt.Printf, and encloses them in a box of
-// arrows pointing at their content, in order to better highlight it. See
-// ExampleBoxOutput
-func BoxOutput(errorMsgTemplate string, errorMsgValues ...interface{}) string {
-	errorMsgTemplate = fmt.Sprintf(errorMsgTemplate, errorMsgValues...)
-	lines := strings.Split(errorMsgTemplate, "\n")
-	maxlen := 0
-	for _, line := range lines {
-		if len(line) > maxlen {
-			maxlen = len(line)
-		}
-	}
-	internalLength := maxlen + 4
-	output := "↘" + strings.Repeat("↓", internalLength) + "↙\n" // top line
-	output += "→  " + strings.Repeat(" ", maxlen) + "  ←\n"
-	readme := strings.Repeat("README ", maxlen/7)
-	output += "→  " + readme + strings.Repeat(" ", maxlen-len(readme)) + "  ←\n"
-	output += "→  " + strings.Repeat(" ", maxlen) + "  ←\n"
-	for _, line := range lines {
-		output += "→  " + line + strings.Repeat(" ", maxlen-len(line)) + "  ←\n"
-	}
-	output += "→  " + strings.Repeat(" ", maxlen) + "  ←\n"
-	output += "→  " + readme + strings.Repeat(" ", maxlen-len(readme)) + "  ←\n"
-	output += "→  " + strings.Repeat(" ", maxlen) + "  ←\n"
-	return "\n" + output + "↗" + strings.Repeat("↑", internalLength) + "↖" + // bottom line
-		"\n\n"
 }
 
 // ConcatBytes appends a bunch of byte arrays into a single byte array
@@ -578,8 +567,6 @@ func (eb *ErrorBuffer) SetCap(cap int) {
 }
 
 // UnwrapError returns a list of underlying errors if passed error implements joinedError or return the err in a single-element list otherwise.
-//
-//nolint:errorlint // error type checks will fail on wrapped errors. Disabled since we are not doing checks on error types.
 func UnwrapError(err error) []error {
 	joined, ok := err.(interface{ Unwrap() []error })
 	if !ok {

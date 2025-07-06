@@ -7,7 +7,7 @@ import (
 	services2 "github.com/smartcontractkit/chainlink/v2/core/services"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/loop"
 
@@ -17,7 +17,7 @@ import (
 // FakeRelayerChainInteroperators is a fake chainlink.RelayerChainInteroperators.
 // This exists because mockery generation doesn't understand how to produce an alias instead of the underlying type (which is not exported in this case).
 type FakeRelayerChainInteroperators struct {
-	Relayers  []loop.Relayer
+	Relayers  map[types.RelayID]loop.Relayer
 	EVMChains legacyevm.LegacyChainContainer
 	Nodes     []types.NodeStatus
 	NodesErr  error
@@ -40,25 +40,31 @@ func (f *FakeRelayerChainInteroperators) List(filter chainlink.FilterFn) chainli
 }
 
 func (f *FakeRelayerChainInteroperators) Get(id types.RelayID) (loop.Relayer, error) {
-	panic("unimplemented")
+	r, ok := f.Relayers[id]
+	if !ok {
+		return nil, chainlink.ErrNoSuchRelayer
+	}
+	return r, nil
 }
 
-func (f *FakeRelayerChainInteroperators) GetIDToRelayerMap() (map[types.RelayID]loop.Relayer, error) {
-	panic("unimplemented")
-}
-
-func (f *FakeRelayerChainInteroperators) Slice() []loop.Relayer {
+func (f *FakeRelayerChainInteroperators) GetIDToRelayerMap() map[types.RelayID]loop.Relayer {
 	return f.Relayers
 }
 
-func (f *FakeRelayerChainInteroperators) LegacyCosmosChains() chainlink.LegacyCosmosContainer {
-	panic("unimplemented")
+func (f *FakeRelayerChainInteroperators) Slice() []loop.Relayer {
+	var relayers []loop.Relayer
+
+	for _, value := range f.Relayers {
+		relayers = append(relayers, value)
+	}
+
+	return relayers
 }
 
 func (f *FakeRelayerChainInteroperators) ChainStatus(ctx context.Context, id types.RelayID) (types.ChainStatus, error) {
 	panic("unimplemented")
 }
 
-func (f *FakeRelayerChainInteroperators) ChainStatuses(ctx context.Context, offset, limit int) ([]types.ChainStatus, int, error) {
+func (f *FakeRelayerChainInteroperators) ChainStatuses(ctx context.Context, offset, limit int) ([]chainlink.NetworkChainStatus, int, error) {
 	panic("unimplemented")
 }

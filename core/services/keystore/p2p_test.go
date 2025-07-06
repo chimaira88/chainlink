@@ -35,7 +35,7 @@ func Test_P2PKeyStore_E2E(t *testing.T) {
 		defer reset()
 		keys, err := ks.GetAll()
 		require.NoError(t, err)
-		require.Equal(t, 0, len(keys))
+		require.Empty(t, keys)
 	})
 
 	t.Run("errors when getting non-existent ID", func(t *testing.T) {
@@ -96,14 +96,14 @@ func Test_P2PKeyStore_E2E(t *testing.T) {
 		assert.Error(t, err)
 		keys, err := ks.GetAll()
 		require.NoError(t, err)
-		require.Equal(t, 1, len(keys))
+		require.Len(t, keys, 1)
 		_, err = ks.Delete(ctx, newKey.PeerID())
 		require.NoError(t, err)
 		_, err = ks.Delete(ctx, newKey.PeerID())
 		assert.Error(t, err)
 		keys, err = ks.GetAll()
 		require.NoError(t, err)
-		require.Equal(t, 0, len(keys))
+		require.Empty(t, keys)
 		_, err = ks.Get(newKey.PeerID())
 		require.Error(t, err)
 	})
@@ -116,14 +116,14 @@ func Test_P2PKeyStore_E2E(t *testing.T) {
 
 		keys, err := ks.GetAll()
 		assert.NoError(t, err)
-		require.Equal(t, 1, len(keys))
+		require.Len(t, keys, 1)
 
 		err = ks.EnsureKey(ctx)
 		assert.NoError(t, err)
 
 		keys, err = ks.GetAll()
 		assert.NoError(t, err)
-		require.Equal(t, 1, len(keys))
+		require.Len(t, keys, 1)
 	})
 
 	t.Run("GetOrFirst", func(t *testing.T) {
@@ -146,7 +146,7 @@ func Test_P2PKeyStore_E2E(t *testing.T) {
 		require.NoError(t, err)
 		_, err = ks.GetOrFirst(p2pkey.PeerID{})
 		require.Contains(t, err.Error(), "multiple p2p keys found")
-		//Check for possible keys in error message
+		// Check for possible keys in error message
 		require.Contains(t, err.Error(), k1.ID())
 		require.Contains(t, err.Error(), k2.ID())
 		require.Contains(t, err.Error(), k3.ID())

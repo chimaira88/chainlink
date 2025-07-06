@@ -38,14 +38,14 @@ func TestLoopRegistryServer_CantWriteToResponse(t *testing.T) {
 	l, o := logger.TestLoggerObserved(t, zap.ErrorLevel)
 	s := &LoopRegistryServer{
 		exposedPromPort: 1,
-		registry:        plugins.NewLoopRegistry(l, nil),
+		registry:        plugins.NewTestLoopRegistry(l),
 		logger:          l.(logger.SugaredLogger),
 		jsonMarshalFn:   json.Marshal,
 	}
 
 	rw := newResponseWriter()
 	s.discoveryHandler(rw, &http.Request{})
-	assert.Equal(t, rw.statusCode, http.StatusInternalServerError)
+	assert.Equal(t, http.StatusInternalServerError, rw.statusCode)
 	assert.Equal(t, 1, o.FilterMessageSnippet("could not write to response").Len())
 }
 
@@ -53,7 +53,7 @@ func TestLoopRegistryServer_CantMarshal(t *testing.T) {
 	l, o := logger.TestLoggerObserved(t, zap.ErrorLevel)
 	s := &LoopRegistryServer{
 		exposedPromPort: 1,
-		registry:        plugins.NewLoopRegistry(l, nil),
+		registry:        plugins.NewTestLoopRegistry(l),
 		logger:          l.(logger.SugaredLogger),
 		jsonMarshalFn: func(any) ([]byte, error) {
 			return []byte(""), errors.New("can't unmarshal")
@@ -62,6 +62,6 @@ func TestLoopRegistryServer_CantMarshal(t *testing.T) {
 
 	rw := newResponseWriter()
 	s.discoveryHandler(rw, &http.Request{})
-	assert.Equal(t, rw.statusCode, http.StatusInternalServerError)
+	assert.Equal(t, http.StatusInternalServerError, rw.statusCode)
 	assert.Equal(t, 1, o.FilterMessageSnippet("could not write to response").Len())
 }

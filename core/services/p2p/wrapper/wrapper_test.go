@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/hashicorp/consul/sdk/freeport"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smartcontractkit/freeport"
+
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/p2pkey"
@@ -18,6 +20,8 @@ import (
 )
 
 func TestPeerWrapper_CleanStartClose(t *testing.T) {
+	db := pgtest.NewSqlxDB(t)
+
 	lggr := logger.TestLogger(t)
 	port := freeport.GetOne(t)
 	cfg := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
@@ -30,7 +34,7 @@ func TestPeerWrapper_CleanStartClose(t *testing.T) {
 	require.NoError(t, err)
 	keystoreP2P.On("GetOrFirst", mock.Anything).Return(key, nil)
 
-	wrapper := wrapper.NewExternalPeerWrapper(keystoreP2P, cfg.Capabilities().Peering(), lggr)
+	wrapper := wrapper.NewExternalPeerWrapper(keystoreP2P, cfg.Capabilities().Peering(), db, lggr)
 	require.NotNil(t, wrapper)
 	require.NoError(t, wrapper.Start(testutils.Context(t)))
 	require.NoError(t, wrapper.Close())

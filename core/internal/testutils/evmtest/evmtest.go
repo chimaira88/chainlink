@@ -1,16 +1,14 @@
 package evmtest
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"testing"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/pelletier/go-toml/v2"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v4"
 
@@ -20,82 +18,80 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox/mailboxtest"
 
-	commonmocks "github.com/smartcontractkit/chainlink/v2/common/types/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/chains"
-	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	evmclimocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
-	evmconfig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config"
-	evmtoml "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas"
-	httypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/headtracker/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/log"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+	evmclient "github.com/smartcontractkit/chainlink-evm/pkg/client"
+	"github.com/smartcontractkit/chainlink-evm/pkg/client/clienttest"
+	evmconfig "github.com/smartcontractkit/chainlink-evm/pkg/config"
+	configtoml "github.com/smartcontractkit/chainlink-evm/pkg/config/toml"
+	evmheads "github.com/smartcontractkit/chainlink-evm/pkg/heads"
+	"github.com/smartcontractkit/chainlink-evm/pkg/log"
+	"github.com/smartcontractkit/chainlink-evm/pkg/logpoller"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
+	ubig "github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
+
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
 	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 )
 
-func NewChainScopedConfig(t testing.TB, cfg legacyevm.AppConfig) evmconfig.ChainScopedConfig {
-	var evmCfg *evmtoml.EVMConfig
+func NewChainScopedConfig(t testing.TB, cfg configtoml.HasEVMConfigs) evmconfig.ChainScopedConfig {
+	var evmCfg *configtoml.EVMConfig
 	if len(cfg.EVMConfigs()) > 0 {
 		evmCfg = cfg.EVMConfigs()[0]
 	} else {
 		var chainID = (*ubig.Big)(testutils.FixtureChainID)
-		evmCfg = &evmtoml.EVMConfig{
+		evmCfg = &configtoml.EVMConfig{
 			ChainID: chainID,
-			Chain:   evmtoml.Defaults(chainID),
+			Chain:   configtoml.Defaults(chainID),
 		}
 	}
 
-	return evmconfig.NewTOMLChainScopedConfig(evmCfg, logger.TestLogger(t))
-
+	return evmconfig.NewTOMLChainScopedConfig(evmCfg)
 }
 
 type TestChainOpts struct {
 	Client         evmclient.Client
 	LogBroadcaster log.Broadcaster
 	LogPoller      logpoller.LogPoller
-	GeneralConfig  legacyevm.AppConfig
-	HeadTracker    httypes.HeadTracker
+	ChainConfigs   configtoml.EVMConfigs
+	DatabaseConfig txmgr.DatabaseConfig
+	FeatureConfig  legacyevm.FeatureConfig
+	ListenerConfig txmgr.ListenerConfig
+	HeadTracker    evmheads.Tracker
 	DB             sqlutil.DataSource
 	TxManager      txmgr.TxManager
 	KeyStore       keystore.Eth
 	MailMon        *mailbox.Monitor
-	GasEstimator   gas.EvmFeeEstimator
 }
 
-// NewChainRelayExtenders returns a simple chain collection with one chain and
+// NewLegacyChains returns a simple chain collection with one chain and
 // allows to mock client/config on that chain
-func NewChainRelayExtenders(t testing.TB, testopts TestChainOpts) *evmrelay.ChainRelayerExtenders {
-	opts := NewChainRelayExtOpts(t, testopts)
-	cc, err := evmrelay.NewChainRelayerExtenders(testutils.Context(t), opts)
+func NewLegacyChains(t testing.TB, testopts TestChainOpts) *legacyevm.LegacyChains {
+	lggr, ks, opts := NewChainOpts(t, testopts)
+	cc, err := evmrelay.NewLegacyChainsAndConfig(lggr, ks, opts)
 	require.NoError(t, err)
-	return cc
+	return cc.NewLegacyChains()
 }
 
-func NewChainRelayExtOpts(t testing.TB, testopts TestChainOpts) legacyevm.ChainRelayExtenderConfig {
+func NewChainOpts(t testing.TB, testopts TestChainOpts) (logger.Logger, keystore.Eth, legacyevm.ChainOpts) {
 	require.NotNil(t, testopts.KeyStore)
 	lggr := logger.TestLogger(t)
-	opts := legacyevm.ChainRelayExtenderConfig{
-		Logger:   lggr,
-		KeyStore: testopts.KeyStore,
-		ChainOpts: legacyevm.ChainOpts{
-			AppConfig:    testopts.GeneralConfig,
-			MailMon:      testopts.MailMon,
-			GasEstimator: testopts.GasEstimator,
-			DS:           testopts.DB,
-		},
+	opts := legacyevm.ChainOpts{
+		ChainConfigs:   testopts.ChainConfigs,
+		DatabaseConfig: testopts.DatabaseConfig,
+		ListenerConfig: testopts.ListenerConfig,
+		FeatureConfig:  testopts.FeatureConfig,
+		MailMon:        testopts.MailMon,
+		DS:             testopts.DB,
 	}
 	opts.GenEthClient = func(*big.Int) evmclient.Client {
 		if testopts.Client != nil {
 			return testopts.Client
 		}
-		return evmclient.NewNullClient(MustGetDefaultChainID(t, testopts.GeneralConfig.EVMConfigs()), logger.TestLogger(t))
+		return evmclient.NewNullClient(MustGetDefaultChainID(t, testopts.ChainConfigs), logger.TestLogger(t))
 	}
 	if testopts.LogBroadcaster != nil {
 		opts.GenLogBroadcaster = func(*big.Int) log.Broadcaster {
@@ -108,7 +104,7 @@ func NewChainRelayExtOpts(t testing.TB, testopts TestChainOpts) legacyevm.ChainR
 		}
 	}
 	if testopts.HeadTracker != nil {
-		opts.GenHeadTracker = func(*big.Int, httypes.HeadBroadcaster) httypes.HeadTracker {
+		opts.GenHeadTracker = func(*big.Int, evmheads.Broadcaster) evmheads.Tracker {
 			return testopts.HeadTracker
 		}
 	}
@@ -120,17 +116,12 @@ func NewChainRelayExtOpts(t testing.TB, testopts TestChainOpts) legacyevm.ChainR
 	if opts.MailMon == nil {
 		opts.MailMon = servicetest.Run(t, mailboxtest.NewMonitor(t))
 	}
-	if testopts.GasEstimator != nil {
-		opts.GenGasEstimator = func(*big.Int) gas.EvmFeeEstimator {
-			return testopts.GasEstimator
-		}
-	}
 
-	return opts
+	return lggr, testopts.KeyStore, opts
 }
 
 // Deprecated, this is a replacement function for tests for now removed default evmChainID logic
-func MustGetDefaultChainID(t testing.TB, evmCfgs evmtoml.EVMConfigs) *big.Int {
+func MustGetDefaultChainID(t testing.TB, evmCfgs configtoml.EVMConfigs) *big.Int {
 	if len(evmCfgs) == 0 {
 		t.Fatalf("at least one evm chain config must be defined")
 	}
@@ -143,21 +134,25 @@ func MustGetDefaultChain(t testing.TB, cc legacyevm.LegacyChainContainer) legacy
 		t.Fatalf("at least one evm chain container must be defined")
 	}
 
-	return cc.Slice()[0]
+	c, ok := cc.Slice()[0].(legacyevm.Chain)
+	if !ok {
+		t.Fatalf("not available in LOOPP mode: %v", errors.ErrUnsupported)
+	}
+	return c
 }
 
 type TestConfigs struct {
 	mu sync.RWMutex
-	evmtoml.EVMConfigs
+	configtoml.EVMConfigs
 }
 
 var _ evmtypes.Configs = &TestConfigs{}
 
-func NewTestConfigs(cs ...*evmtoml.EVMConfig) *TestConfigs {
-	return &TestConfigs{EVMConfigs: evmtoml.EVMConfigs(cs)}
+func NewTestConfigs(cs ...*configtoml.EVMConfig) *TestConfigs {
+	return &TestConfigs{EVMConfigs: configtoml.EVMConfigs(cs)}
 }
 
-func (mo *TestConfigs) PutChains(cs ...evmtoml.EVMConfig) {
+func (mo *TestConfigs) PutChains(cs ...configtoml.EVMConfig) {
 	mo.mu.Lock()
 	defer mo.mu.Unlock()
 chains:
@@ -266,7 +261,7 @@ func (mo *TestConfigs) NodeStatusesPaged(offset int, limit int, chainIDs ...stri
 	return
 }
 
-func legacyNode(n *evmtoml.Node, chainID *ubig.Big) (v2 evmtypes.Node) {
+func legacyNode(n *configtoml.Node, chainID *ubig.Big) (v2 evmtypes.Node) {
 	v2.Name = *n.Name
 	v2.EVMChainID = *chainID
 	if n.HTTPURL != nil {
@@ -281,7 +276,7 @@ func legacyNode(n *evmtoml.Node, chainID *ubig.Big) (v2 evmtypes.Node) {
 	return
 }
 
-func nodeStatus(n *evmtoml.Node, chainID string) (types.NodeStatus, error) {
+func nodeStatus(n *configtoml.Node, chainID string) (types.NodeStatus, error) {
 	var s types.NodeStatus
 	s.ChainID = chainID
 	s.Name = *n.Name
@@ -293,78 +288,15 @@ func nodeStatus(n *evmtoml.Node, chainID string) (types.NodeStatus, error) {
 	return s, nil
 }
 
-func NewEthClientMock(t *testing.T) *evmclimocks.Client {
-	return evmclimocks.NewClient(t)
+// Deprecated: use clienttest.NewClient
+func NewEthClientMock(t *testing.T) *clienttest.Client {
+	return clienttest.NewClient(t)
 }
 
-func NewEthClientMockWithDefaultChain(t *testing.T) *evmclimocks.Client {
+// Deprecated: use clienttest.NewClientWithDefaultChainID
+func NewEthClientMockWithDefaultChain(t *testing.T) *clienttest.Client {
 	c := NewEthClientMock(t)
 	c.On("ConfiguredChainID").Return(testutils.FixtureChainID).Maybe()
 	c.On("IsL2").Return(false).Maybe()
 	return c
-}
-
-type MockEth struct {
-	EthClient       *evmclimocks.Client
-	CheckFilterLogs func(int64, int64)
-
-	subsMu           sync.RWMutex
-	subs             []*commonmocks.Subscription
-	errChs           []chan error
-	subscribeCalls   atomic.Int32
-	unsubscribeCalls atomic.Int32
-}
-
-func (m *MockEth) SubscribeCallCount() int32 {
-	return m.subscribeCalls.Load()
-}
-
-func (m *MockEth) UnsubscribeCallCount() int32 {
-	return m.unsubscribeCalls.Load()
-}
-
-func (m *MockEth) NewSub(t *testing.T) ethereum.Subscription {
-	m.subscribeCalls.Add(1)
-	sub := commonmocks.NewSubscription(t)
-	errCh := make(chan error)
-	sub.On("Err").
-		Return(func() <-chan error { return errCh }).Maybe()
-	sub.On("Unsubscribe").
-		Run(func(mock.Arguments) {
-			m.unsubscribeCalls.Add(1)
-			close(errCh)
-		}).Return().Maybe()
-	m.subsMu.Lock()
-	m.subs = append(m.subs, sub)
-	m.errChs = append(m.errChs, errCh)
-	m.subsMu.Unlock()
-	return sub
-}
-
-func (m *MockEth) SubsErr(err error) {
-	m.subsMu.Lock()
-	defer m.subsMu.Unlock()
-	for _, errCh := range m.errChs {
-		errCh <- err
-	}
-}
-
-type RawSub[T any] struct {
-	ch  chan<- T
-	err <-chan error
-}
-
-func NewRawSub[T any](ch chan<- T, err <-chan error) RawSub[T] {
-	return RawSub[T]{ch: ch, err: err}
-}
-
-func (r *RawSub[T]) CloseCh() {
-	close(r.ch)
-}
-
-func (r *RawSub[T]) TrySend(t T) {
-	select {
-	case <-r.err:
-	case r.ch <- t:
-	}
 }

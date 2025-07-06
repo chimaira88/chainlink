@@ -11,12 +11,16 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/types"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	"github.com/smartcontractkit/chainlink/v2/core/chains"
+	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/vrfkey"
 	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 	"github.com/smartcontractkit/chainlink/v2/core/utils/stringutils"
+	"github.com/smartcontractkit/chainlink/v2/core/web/loader"
 )
 
 // Bridge retrieves a bridges by name.
@@ -63,23 +67,37 @@ func (r *Resolver) Bridges(ctx context.Context, args struct {
 }
 
 // Chain retrieves a chain by id.
-func (r *Resolver) Chain(ctx context.Context, args struct{ ID graphql.ID }) (*ChainPayloadResolver, error) {
+func (r *Resolver) Chain(ctx context.Context,
+	args struct {
+		ID      graphql.ID
+		Network *string
+	}) (*ChainPayloadResolver, error) {
 	if err := authenticateUser(ctx); err != nil {
 		return nil, err
 	}
 
-	cs, _, err := r.App.EVMORM().Chains(string(args.ID))
+	// fall back to original behaviour if network is not provided
+	if args.Network == nil {
+		id, err := loader.GetChainByID(ctx, string(args.ID))
+		if err != nil {
+			if errors.Is(err, chains.ErrNotFound) {
+				return NewChainPayload(chainlink.NetworkChainStatus{}, chains.ErrNotFound), nil
+			}
+			return nil, err
+		}
+		return NewChainPayload(*id, nil), nil
+	}
+
+	relayID := types.NewRelayID(*args.Network, string(args.ID))
+	id, err := loader.GetChainByRelayID(ctx, relayID.Name())
 	if err != nil {
+		if errors.Is(err, chains.ErrNotFound) {
+			return NewChainPayload(chainlink.NetworkChainStatus{}, chains.ErrNotFound), nil
+		}
 		return nil, err
 	}
-	l := len(cs)
-	if l == 0 {
-		return NewChainPayload(types.ChainStatus{}, chains.ErrNotFound), nil
-	}
-	if l > 1 {
-		return nil, fmt.Errorf("multiple chains found: %d", len(cs))
-	}
-	return NewChainPayload(cs[0], nil), nil
+
+	return NewChainPayload(*id, nil), nil
 }
 
 // Chains retrieves a paginated list of chains.
@@ -94,31 +112,47 @@ func (r *Resolver) Chains(ctx context.Context, args struct {
 	offset := pageOffset(args.Offset)
 	limit := pageLimit(args.Limit)
 
-	var chains []types.ChainStatus
-	for _, rel := range r.App.GetRelayers().Slice() {
-		status, err := rel.GetChainStatus(ctx)
+	relayersMap := r.App.GetRelayers().GetIDToRelayerMap()
+
+	chains := make([]chainlink.NetworkChainStatus, 0, len(relayersMap))
+	for k, v := range relayersMap {
+		s, err := v.GetChainStatus(ctx)
 		if err != nil {
 			return nil, err
 		}
-		chains = append(chains, status)
-	}
-	count := len(chains)
 
+		chains = append(chains, chainlink.NetworkChainStatus{
+			ChainStatus: s,
+			Network:     k.Network,
+		})
+	}
+
+	count := len(chains)
 	if count == 0 {
-		//No chains are configured, return an empty ChainsPayload, so we don't break the UI
+		// No chains are configured, return an empty ChainsPayload, so we don't break the UI
 		return NewChainsPayload(nil, 0), nil
 	}
 
 	// bound the chain results
-	if offset >= len(chains) {
+	if offset >= count {
 		return nil, fmt.Errorf("offset %d out of range", offset)
 	}
-	end := len(chains)
+	end := count
 	if limit > 0 && offset+limit < end {
 		end = offset + limit
 	}
 
+	sortByNetworkAndID(chains)
 	return NewChainsPayload(chains[offset:end], int32(count)), nil
+}
+
+func sortByNetworkAndID(chains []chainlink.NetworkChainStatus) {
+	sort.SliceStable(chains, func(i, j int) bool {
+		if chains[i].Network == chains[j].Network {
+			return chains[i].ID < chains[j].ID
+		}
+		return chains[i].Network < chains[j].Network
+	})
 }
 
 // FeedsManager retrieves a feeds manager by id.
@@ -174,7 +208,7 @@ func (r *Resolver) Job(ctx context.Context, args struct{ ID graphql.ID }) (*JobP
 			return NewJobPayload(r.App, nil, err), nil
 		}
 
-		//We still need to show the job in UI/CLI even if the chain id is disabled
+		// We still need to show the job in UI/CLI even if the chain id is disabled
 		if errors.Is(err, chains.ErrNoSuchChainID) {
 			return NewJobPayload(r.App, &j, err), nil
 		}
@@ -418,12 +452,12 @@ func (r *Resolver) ETHKeys(ctx context.Context) (*ETHKeysPayloadResolver, error)
 
 	keys, err := ks.GetAll(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error getting unlocked keys: %v", err)
+		return nil, fmt.Errorf("error getting unlocked keys: %w", err)
 	}
 
 	states, err := ks.GetStatesForKeys(ctx, keys)
 	if err != nil {
-		return nil, fmt.Errorf("error getting key states: %v", err)
+		return nil, fmt.Errorf("error getting key states: %w", err)
 	}
 
 	var ethKeys []ETHKey
@@ -434,7 +468,7 @@ func (r *Resolver) ETHKeys(ctx context.Context) (*ETHKeysPayloadResolver, error)
 			return nil, err
 		}
 
-		chain, err := r.App.GetRelayers().LegacyEVMChains().Get(state.EVMChainID.String())
+		chainService, err := r.App.GetRelayers().LegacyEVMChains().Get(state.EVMChainID.String())
 		if errors.Is(errors.Cause(err), evmrelay.ErrNoChains) {
 			ethKeys = append(ethKeys, ETHKey{
 				addr:  k.EIP55Address,
@@ -443,14 +477,19 @@ func (r *Resolver) ETHKeys(ctx context.Context) (*ETHKeysPayloadResolver, error)
 
 			continue
 		}
+
 		// Don't include keys without valid chain.
 		// OperatorUI fails to show keys where chains are not in the config.
 		if err == nil {
-			ethKeys = append(ethKeys, ETHKey{
+			k := ETHKey{
 				addr:  k.EIP55Address,
 				state: state,
-				chain: chain,
-			})
+			}
+			chain, ok := chainService.(legacyevm.Chain)
+			if ok {
+				k.chain = chain
+			}
+			ethKeys = append(ethKeys, k)
 		}
 	}
 	// Put disabled keys to the end
@@ -550,6 +589,69 @@ func (r *Resolver) SolanaKeys(ctx context.Context) (*SolanaKeysPayloadResolver, 
 	}
 
 	return NewSolanaKeysPayload(keys), nil
+}
+
+func (r *Resolver) AptosKeys(ctx context.Context) (*AptosKeysPayloadResolver, error) {
+	if err := authenticateUser(ctx); err != nil {
+		return nil, err
+	}
+
+	keys, err := r.App.GetKeyStore().Aptos().GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	return NewAptosKeysPayload(keys), nil
+}
+
+func (r *Resolver) CosmosKeys(ctx context.Context) (*CosmosKeysPayloadResolver, error) {
+	if err := authenticateUser(ctx); err != nil {
+		return nil, err
+	}
+	keys, err := r.App.GetKeyStore().Cosmos().GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	return NewCosmosKeysPayload(keys), nil
+}
+
+func (r *Resolver) StarkNetKeys(ctx context.Context) (*StarkNetKeysPayloadResolver, error) {
+	if err := authenticateUser(ctx); err != nil {
+		return nil, err
+	}
+	keys, err := r.App.GetKeyStore().StarkNet().GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	return NewStarkNetKeysPayload(keys), nil
+}
+
+func (r *Resolver) TronKeys(ctx context.Context) (*TronKeysPayloadResolver, error) {
+	if err := authenticateUser(ctx); err != nil {
+		return nil, err
+	}
+
+	keys, err := r.App.GetKeyStore().Tron().GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	return NewTronKeysPayload(keys), nil
+}
+
+func (r *Resolver) TONKeys(ctx context.Context) (*TONKeysPayloadResolver, error) {
+	if err := authenticateUser(ctx); err != nil {
+		return nil, err
+	}
+
+	keys, err := r.App.GetKeyStore().TON().GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	return NewTONKeysPayload(keys), nil
 }
 
 func (r *Resolver) SQLLogging(ctx context.Context) (*GetSQLLoggingPayloadResolver, error) {

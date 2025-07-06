@@ -2,7 +2,7 @@ package job_test
 
 import (
 	"context"
-	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,13 +28,11 @@ func TestJobKVStore(t *testing.T) {
 	config := configtest.NewTestGeneralConfig(t)
 	db := pgtest.NewSqlxDB(t)
 
-	lggr := logger.TestLogger(t)
-
 	pipelineORM := pipeline.NewORM(db, logger.TestLogger(t), config.JobPipeline().MaxSuccessfulRuns())
 	bridgesORM := bridges.NewORM(db)
 
 	jobID := int32(1337)
-	kvStore := job.NewKVStore(jobID, db, lggr)
+	kvStore := job.NewKVStore(jobID, db)
 	jobORM := NewTestORM(t, db, pipelineORM, bridgesORM, cltest.NewKeyStore(t, db))
 
 	jb, err := directrequest.ValidatedDirectRequestSpec(testspecs.GetDirectRequestSpec())
@@ -49,7 +47,7 @@ func TestJobKVStore(t *testing.T) {
 	}
 
 	for i, insertBytes := range values {
-		testKey := "test_key_" + fmt.Sprint(i)
+		testKey := "test_key_" + strconv.Itoa(i)
 		require.NoError(t, kvStore.Store(ctx, testKey, insertBytes))
 
 		var readBytes []byte
@@ -73,5 +71,5 @@ func TestJobKVStore(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, td2, fetchedBytes)
 
-	require.NoError(t, jobORM.DeleteJob(ctx, jobID))
+	require.NoError(t, jobORM.DeleteJob(ctx, jobID, jb.Type))
 }

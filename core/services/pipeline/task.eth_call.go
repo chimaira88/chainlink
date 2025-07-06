@@ -13,10 +13,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/multierr"
 
-	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+	evmclient "github.com/smartcontractkit/chainlink-evm/pkg/client"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils"
 )
 
 // Return types:
@@ -105,6 +106,10 @@ func (t *ETHCallTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, in
 		err = fmt.Errorf("%w: %s: %w", ErrInvalidEVMChainID, chainID, err)
 		return Result{Error: err}, runInfo
 	}
+	legacyChain, ok := chain.(legacyevm.Chain)
+	if !ok {
+		return Result{Error: ErrUnsupportedInLOOPPMode}, runInfo
+	}
 
 	var selectedGas uint64
 	if gasUnlimited {
@@ -115,7 +120,7 @@ func (t *ETHCallTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, in
 		if gas > 0 {
 			selectedGas = uint64(gas)
 		} else {
-			selectedGas = SelectGasLimit(chain.Config().EVM().GasEstimator(), t.jobType, t.specGasLimit)
+			selectedGas = SelectGasLimit(legacyChain.Config().EVM().GasEstimator(), t.jobType, t.specGasLimit)
 		}
 	}
 
@@ -129,7 +134,7 @@ func (t *ETHCallTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, in
 		GasFeeCap: gasFeeCap.BigInt(),
 	}
 
-	lggr = lggr.With("gas", call.Gas).
+	lggr = logger.Sugared(lggr).With("gas", call.Gas).
 		With("gasPrice", call.GasPrice).
 		With("gasTipCap", call.GasTipCap).
 		With("gasFeeCap", call.GasFeeCap)
@@ -139,9 +144,9 @@ func (t *ETHCallTask) Run(ctx context.Context, lggr logger.Logger, vars Vars, in
 	var resp []byte
 	blockStr := block.String()
 	if blockStr == "" || strings.ToLower(blockStr) == "latest" {
-		resp, err = chain.Client().CallContract(ctx, call, nil)
+		resp, err = legacyChain.Client().CallContract(ctx, call, nil)
 	} else if strings.ToLower(blockStr) == "pending" {
-		resp, err = chain.Client().PendingCallContract(ctx, call)
+		resp, err = legacyChain.Client().PendingCallContract(ctx, call)
 	}
 
 	elapsed := time.Since(start)

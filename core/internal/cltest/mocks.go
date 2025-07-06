@@ -7,30 +7,31 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-
+	gethTypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/jmoiron/sqlx"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/robfig/cron/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
-	evmmocks "github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm/mocks"
+	"github.com/smartcontractkit/chainlink-common/pkg/types"
+	evmclient "github.com/smartcontractkit/chainlink-evm/pkg/client"
+	"github.com/smartcontractkit/chainlink-evm/pkg/config/toml"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
+
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+	evmmocks "github.com/smartcontractkit/chainlink/v2/common/chains/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/cmd"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/sessions"
 	"github.com/smartcontractkit/chainlink/v2/core/web"
-
-	gethTypes "github.com/ethereum/go-ethereum/core/types"
-	"github.com/robfig/cron/v3"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // MockSubscription a mock subscription
@@ -83,13 +84,27 @@ func (rm *RendererMock) Render(v interface{}, headers ...string) error {
 	return nil
 }
 
+type InstanceAppFactoryWithKeystoreMock struct {
+	App chainlink.Application
+}
+
+// NewApplication creates a new application with specified config and calls the authenticate function of the keystore
+func (f InstanceAppFactoryWithKeystoreMock) NewApplication(ctx context.Context, cfg chainlink.GeneralConfig, lggr logger.Logger, registerer prometheus.Registerer, db *sqlx.DB, ks cmd.TerminalKeyStoreAuthenticator) (chainlink.Application, error) {
+	keyStore := f.App.GetKeyStore()
+	err := ks.Authenticate(ctx, keyStore, cfg.Password())
+	if err != nil {
+		return nil, fmt.Errorf("error authenticating keystore: %w", err)
+	}
+	return f.App, nil
+}
+
 // InstanceAppFactory is an InstanceAppFactory
 type InstanceAppFactory struct {
 	App chainlink.Application
 }
 
 // NewApplication creates a new application with specified config
-func (f InstanceAppFactory) NewApplication(context.Context, chainlink.GeneralConfig, logger.Logger, *sqlx.DB) (chainlink.Application, error) {
+func (f InstanceAppFactory) NewApplication(context.Context, chainlink.GeneralConfig, logger.Logger, prometheus.Registerer, *sqlx.DB, cmd.TerminalKeyStoreAuthenticator) (chainlink.Application, error) {
 	return f.App, nil
 }
 
@@ -97,7 +112,7 @@ type seededAppFactory struct {
 	Application chainlink.Application
 }
 
-func (s seededAppFactory) NewApplication(context.Context, chainlink.GeneralConfig, logger.Logger, *sqlx.DB) (chainlink.Application, error) {
+func (s seededAppFactory) NewApplication(context.Context, chainlink.GeneralConfig, logger.Logger, prometheus.Registerer, *sqlx.DB, cmd.TerminalKeyStoreAuthenticator) (chainlink.Application, error) {
 	return noopStopApplication{s.Application}, nil
 }
 
@@ -272,21 +287,6 @@ type MockCronEntry struct {
 	Function func()
 }
 
-// MockHeadTrackable allows you to mock HeadTrackable
-type MockHeadTrackable struct {
-	onNewHeadCount atomic.Int32
-}
-
-// OnNewLongestChain increases the OnNewLongestChainCount count by one
-func (m *MockHeadTrackable) OnNewLongestChain(context.Context, *evmtypes.Head) {
-	m.onNewHeadCount.Add(1)
-}
-
-// OnNewLongestChainCount returns the count of new heads, safely.
-func (m *MockHeadTrackable) OnNewLongestChainCount() int32 {
-	return m.onNewHeadCount.Load()
-}
-
 // NeverSleeper is a struct that never sleeps
 type NeverSleeper struct{}
 
@@ -401,19 +401,19 @@ func (m MockPasswordPrompter) Prompt() string {
 	return m.Password
 }
 
-func NewLegacyChainsWithMockChain(t testing.TB, ethClient evmclient.Client, cfg legacyevm.AppConfig) legacyevm.LegacyChainContainer {
+func NewLegacyChainsWithMockChain(t testing.TB, ethClient evmclient.Client, cfg toml.HasEVMConfigs) legacyevm.LegacyChainContainer {
 	ch := new(evmmocks.Chain)
 	ch.On("Client").Return(ethClient)
 	ch.On("Logger").Return(logger.TestLogger(t))
 	scopedCfg := evmtest.NewChainScopedConfig(t, cfg)
 	ch.On("ID").Return(scopedCfg.EVM().ChainID())
 	ch.On("Config").Return(scopedCfg)
+	ch.On("HeadTracker").Return(nil)
 
-	return NewLegacyChainsWithChain(ch, cfg)
-
+	return NewLegacyChainsWithChain(ch)
 }
 
-func NewLegacyChainsWithMockChainAndTxManager(t testing.TB, ethClient evmclient.Client, cfg legacyevm.AppConfig, txm txmgr.TxManager) legacyevm.LegacyChainContainer {
+func NewLegacyChainsWithMockChainAndTxManager(t testing.TB, ethClient evmclient.Client, cfg toml.HasEVMConfigs, txm txmgr.TxManager) legacyevm.LegacyChainContainer {
 	ch := new(evmmocks.Chain)
 	ch.On("Client").Return(ethClient)
 	ch.On("Logger").Return(logger.TestLogger(t))
@@ -422,10 +422,10 @@ func NewLegacyChainsWithMockChainAndTxManager(t testing.TB, ethClient evmclient.
 	ch.On("Config").Return(scopedCfg)
 	ch.On("TxManager").Return(txm)
 
-	return NewLegacyChainsWithChain(ch, cfg)
+	return NewLegacyChainsWithChain(ch)
 }
 
-func NewLegacyChainsWithChain(ch legacyevm.Chain, cfg legacyevm.AppConfig) legacyevm.LegacyChainContainer {
-	m := map[string]legacyevm.Chain{ch.ID().String(): ch}
-	return legacyevm.NewLegacyChains(m, cfg.EVMConfigs())
+func NewLegacyChainsWithChain(ch legacyevm.Chain) legacyevm.LegacyChainContainer {
+	m := map[string]types.ChainService{ch.ID().String(): ch}
+	return legacyevm.NewLegacyChains(m)
 }

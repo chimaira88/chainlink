@@ -11,10 +11,11 @@ import (
 	"gopkg.in/guregu/null.v4"
 
 	clnull "github.com/smartcontractkit/chainlink-common/pkg/utils/null"
-	txmgrcommon "github.com/smartcontractkit/chainlink/v2/common/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/chains"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	txmmocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr/mocks"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	txmgrcommon "github.com/smartcontractkit/chainlink-framework/chains/txmgr"
+
+	txmmocks "github.com/smartcontractkit/chainlink/v2/common/txmgr/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
@@ -23,7 +24,6 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	keystoremocks "github.com/smartcontractkit/chainlink/v2/core/services/keystore/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
-	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 )
 
 func TestETHTxTask(t *testing.T) {
@@ -72,7 +72,6 @@ func TestETHTxTask(t *testing.T) {
 			pipeline.NewVarsFrom(nil),
 			nil,
 			func(keyStore *keystoremocks.Eth, txManager *txmmocks.MockEvmTxManager) {
-
 				data := []byte("foobar")
 				gasLimit := uint64(12345)
 				jobID := int32(321)
@@ -394,7 +393,6 @@ func TestETHTxTask(t *testing.T) {
 			}),
 			nil,
 			func(keyStore *keystoremocks.Eth, txManager *txmmocks.MockEvmTxManager) {
-
 				keyStore.On("GetRoundRobinAddress", mock.Anything, testutils.FixtureChainID).Return(nil, errors.New("uh oh"))
 			},
 			nil, pipeline.ErrTaskRunFailed, "while querying keystore", pipeline.RunInfo{IsRetryable: true},
@@ -581,9 +579,15 @@ func TestETHTxTask(t *testing.T) {
 			})
 			lggr := logger.TestLogger(t)
 
-			relayExtenders := evmtest.NewChainRelayExtenders(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg,
-				TxManager: txManager, KeyStore: keyStore})
-			legacyChains := evmrelay.NewLegacyChainsFromRelayerExtenders(relayExtenders)
+			legacyChains := evmtest.NewLegacyChains(t, evmtest.TestChainOpts{
+				DB:             db,
+				ChainConfigs:   cfg.EVMConfigs(),
+				DatabaseConfig: cfg.Database(),
+				FeatureConfig:  cfg.Feature(),
+				ListenerConfig: cfg.Database().Listener(),
+				TxManager:      txManager,
+				KeyStore:       keyStore,
+			})
 
 			test.setupClientMocks(keyStore, txManager)
 			task.HelperSetDependencies(legacyChains, keyStore, test.specGasLimit, pipeline.DirectRequestJobType)

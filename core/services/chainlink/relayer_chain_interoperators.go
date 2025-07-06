@@ -4,18 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/loop"
-	relay "github.com/smartcontractkit/chainlink-common/pkg/loop/adapters/relay"
 	"github.com/smartcontractkit/chainlink-common/pkg/types"
-	"github.com/smartcontractkit/chainlink-cosmos/pkg/cosmos"
-	"github.com/smartcontractkit/chainlink-cosmos/pkg/cosmos/adapters"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
 	"github.com/smartcontractkit/chainlink/v2/core/services"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2"
 )
 
@@ -47,12 +48,17 @@ type LoopRelayerStorer interface {
 // on the relayer interface.
 type LegacyChainer interface {
 	LegacyEVMChains() legacyevm.LegacyChainContainer
-	LegacyCosmosChains() LegacyCosmosContainer
+}
+
+// NetworkChainStatus is a ChainStatus from a particlar Network.
+type NetworkChainStatus struct {
+	Network string
+	types.ChainStatus
 }
 
 type ChainStatuser interface {
 	ChainStatus(ctx context.Context, id types.RelayID) (types.ChainStatus, error)
-	ChainStatuses(ctx context.Context, offset, limit int) ([]types.ChainStatus, int, error)
+	ChainStatuses(ctx context.Context, offset, limit int) ([]NetworkChainStatus, int, error)
 }
 
 // NodesStatuser is an interface for node configuration and state.
@@ -69,12 +75,18 @@ type ChainsNodesStatuser interface {
 
 var _ RelayerChainInteroperators = &CoreRelayerChainInteroperators{}
 
+type DummyFactory interface {
+	NewDummy(config DummyFactoryConfig) (loop.Relayer, error)
+}
+
 // CoreRelayerChainInteroperators implements [RelayerChainInteroperators]
 // as needed for the core [chainlink.Application]
 type CoreRelayerChainInteroperators struct {
 	mu           sync.Mutex
 	loopRelayers map[types.RelayID]loop.Relayer
-	legacyChains legacyChains
+	legacyChains legacyevm.LegacyChainContainer
+
+	dummyFactory DummyFactory
 
 	// we keep an explicit list of services because the legacy implementations have more than
 	// just the relayer service
@@ -98,50 +110,55 @@ func NewCoreRelayerChainInteroperators(initFuncs ...CoreRelayerChainInitFunc) (*
 // CoreRelayerChainInitFunc is a hook in the constructor to create relayers from a factory.
 type CoreRelayerChainInitFunc func(op *CoreRelayerChainInteroperators) error
 
+// InitDummy instantiates a dummy relayer
+func InitDummy(factory RelayerFactory) CoreRelayerChainInitFunc {
+	return func(op *CoreRelayerChainInteroperators) error {
+		op.dummyFactory = &factory
+		return nil
+	}
+}
+
 // InitEVM is a option for instantiating evm relayers
-func InitEVM(ctx context.Context, factory RelayerFactory, config EVMFactoryConfig) CoreRelayerChainInitFunc {
+func InitEVM(factory RelayerFactory, config EVMFactoryConfig) CoreRelayerChainInitFunc {
 	return func(op *CoreRelayerChainInteroperators) (err error) {
-		adapters, err2 := factory.NewEVM(ctx, config)
+		adapters, err2 := factory.NewEVM(config)
 		if err2 != nil {
 			return fmt.Errorf("failed to setup EVM relayer: %w", err2)
 		}
 
-		legacyMap := make(map[string]legacyevm.Chain)
+		legacyMap := make(map[string]types.ChainService)
 		for id, a := range adapters {
 			// adapter is a service
 			op.srvs = append(op.srvs, a)
 			op.loopRelayers[id] = a
 			legacyMap[id.ChainID] = a.Chain()
 		}
-		op.legacyChains.EVMChains = legacyevm.NewLegacyChains(legacyMap, config.AppConfig.EVMConfigs())
+		op.legacyChains = legacyevm.NewLegacyChains(legacyMap)
 		return nil
 	}
 }
 
 // InitCosmos is a option for instantiating Cosmos relayers
-func InitCosmos(ctx context.Context, factory RelayerFactory, config CosmosFactoryConfig) CoreRelayerChainInitFunc {
+func InitCosmos(factory RelayerFactory, ks keystore.Cosmos, csaKS keystore.CSA, chainCfgs RawConfigs) CoreRelayerChainInitFunc {
 	return func(op *CoreRelayerChainInteroperators) (err error) {
-		adapters, err2 := factory.NewCosmos(config)
-		if err2 != nil {
-			return fmt.Errorf("failed to setup Cosmos relayer: %w", err2)
+		loopKs := &keystore.CosmosLoopSigner{Cosmos: ks}
+		relayers, err := factory.NewCosmos(loopKs, &keystore.CSASigner{CSA: csaKS}, chainCfgs)
+		if err != nil {
+			return fmt.Errorf("failed to setup Cosmos relayer: %w", err)
 		}
-		legacyMap := make(map[string]cosmos.Chain)
-
-		for id, a := range adapters {
-			op.srvs = append(op.srvs, a)
-			op.loopRelayers[id] = a
-			legacyMap[id.ChainID] = a.Chain()
+		for id, relayer := range relayers {
+			op.srvs = append(op.srvs, relayer)
+			op.loopRelayers[id] = relayer
 		}
-		op.legacyChains.CosmosChains = NewLegacyCosmos(legacyMap)
 
 		return nil
 	}
 }
 
 // InitSolana is a option for instantiating Solana relayers
-func InitSolana(ctx context.Context, factory RelayerFactory, config SolanaFactoryConfig) CoreRelayerChainInitFunc {
+func InitSolana(factory RelayerFactory, ks keystore.Solana, csaKS keystore.CSA, config SolanaFactoryConfig) CoreRelayerChainInitFunc {
 	return func(op *CoreRelayerChainInteroperators) error {
-		solRelayers, err := factory.NewSolana(config.Keystore, config.TOMLConfigs)
+		solRelayers, err := factory.NewSolana(&keystore.SolanaLooppSigner{Solana: ks}, &keystore.CSASigner{CSA: csaKS}, config)
 		if err != nil {
 			return fmt.Errorf("failed to setup Solana relayer: %w", err)
 		}
@@ -156,14 +173,69 @@ func InitSolana(ctx context.Context, factory RelayerFactory, config SolanaFactor
 }
 
 // InitStarknet is a option for instantiating Starknet relayers
-func InitStarknet(ctx context.Context, factory RelayerFactory, config StarkNetFactoryConfig) CoreRelayerChainInitFunc {
+func InitStarknet(factory RelayerFactory, ks keystore.StarkNet, csaKS keystore.CSA, chainCfgs RawConfigs) CoreRelayerChainInitFunc {
 	return func(op *CoreRelayerChainInteroperators) (err error) {
-		starkRelayers, err := factory.NewStarkNet(config.Keystore, config.TOMLConfigs)
+		loopKs := &keystore.StarknetLooppSigner{StarkNet: ks}
+		starkRelayers, err := factory.NewStarkNet(loopKs, &keystore.CSASigner{CSA: csaKS}, chainCfgs)
 		if err != nil {
 			return fmt.Errorf("failed to setup StarkNet relayer: %w", err)
 		}
 
 		for id, relayer := range starkRelayers {
+			op.srvs = append(op.srvs, relayer)
+			op.loopRelayers[id] = relayer
+		}
+
+		return nil
+	}
+}
+
+// InitAptos is a option for instantiating Aptos relayers
+func InitAptos(factory RelayerFactory, ks keystore.Aptos, csaKS keystore.CSA, chainCfgs RawConfigs) CoreRelayerChainInitFunc {
+	return func(op *CoreRelayerChainInteroperators) (err error) {
+		loopKs := &keystore.AptosLooppSigner{Aptos: ks}
+		relayers, err := factory.NewAptos(loopKs, &keystore.CSASigner{CSA: csaKS}, chainCfgs)
+		if err != nil {
+			return fmt.Errorf("failed to setup aptos relayer: %w", err)
+		}
+
+		for id, relayer := range relayers {
+			op.srvs = append(op.srvs, relayer)
+			op.loopRelayers[id] = relayer
+		}
+
+		return nil
+	}
+}
+
+// InitTron is a option for instantiating Tron relayers
+func InitTron(factory RelayerFactory, ks keystore.Tron, csaKS keystore.CSA, chainCfgs RawConfigs) CoreRelayerChainInitFunc {
+	return func(op *CoreRelayerChainInteroperators) error {
+		loopKs := &keystore.TronLOOPSigner{Tron: ks}
+		tronRelayers, err := factory.NewTron(loopKs, &keystore.CSASigner{CSA: csaKS}, chainCfgs)
+		if err != nil {
+			return fmt.Errorf("failed to setup Tron relayer: %w", err)
+		}
+
+		for id, relayer := range tronRelayers {
+			op.srvs = append(op.srvs, relayer)
+			op.loopRelayers[id] = relayer
+		}
+
+		return nil
+	}
+}
+
+// InitTON is an option for instantiating TON relayers
+func InitTON(factory RelayerFactory, ks keystore.TON, csaKS keystore.CSA, chainCfgs RawConfigs) CoreRelayerChainInitFunc {
+	return func(op *CoreRelayerChainInteroperators) error {
+		loopKs := &keystore.TONLooppSigner{TON: ks}
+		tonRelayers, err := factory.NewTON(loopKs, &keystore.CSASigner{CSA: csaKS}, chainCfgs)
+		if err != nil {
+			return fmt.Errorf("failed to setup TON relayer: %w", err)
+		}
+
+		for id, relayer := range tonRelayers {
 			op.srvs = append(op.srvs, relayer)
 			op.loopRelayers[id] = relayer
 		}
@@ -178,12 +250,22 @@ func (rs *CoreRelayerChainInteroperators) Get(id types.RelayID) (loop.Relayer, e
 	defer rs.mu.Unlock()
 	lr, exist := rs.loopRelayers[id]
 	if !exist {
+		// lazily create dummy relayers
+		if id.Network == "dummy" {
+			var err error
+			lr, err = rs.dummyFactory.NewDummy(DummyFactoryConfig{id.ChainID})
+			if err != nil {
+				return nil, err
+			}
+			rs.loopRelayers[id] = lr
+			return lr, nil
+		}
 		return nil, fmt.Errorf("%w: %s", ErrNoSuchRelayer, id)
 	}
 	return lr, nil
 }
 
-func (rs *CoreRelayerChainInteroperators) GetIDToRelayerMap() (map[types.RelayID]loop.Relayer, error) {
+func (rs *CoreRelayerChainInteroperators) GetIDToRelayerMap() map[types.RelayID]loop.Relayer {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	result := make(map[types.RelayID]loop.Relayer)
@@ -191,7 +273,7 @@ func (rs *CoreRelayerChainInteroperators) GetIDToRelayerMap() (map[types.RelayID
 		result[id] = relayer
 	}
 
-	return result, nil
+	return result
 }
 
 // LegacyEVMChains returns a container with all the evm chains
@@ -199,20 +281,11 @@ func (rs *CoreRelayerChainInteroperators) GetIDToRelayerMap() (map[types.RelayID
 func (rs *CoreRelayerChainInteroperators) LegacyEVMChains() legacyevm.LegacyChainContainer {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	return rs.legacyChains.EVMChains
-}
-
-// LegacyCosmosChains returns a container with all the cosmos chains
-// TODO BCF-2511
-func (rs *CoreRelayerChainInteroperators) LegacyCosmosChains() LegacyCosmosContainer {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	return rs.legacyChains.CosmosChains
+	return rs.legacyChains
 }
 
 // ChainStatus gets [types.ChainStatus]
 func (rs *CoreRelayerChainInteroperators) ChainStatus(ctx context.Context, id types.RelayID) (types.ChainStatus, error) {
-
 	lr, err := rs.Get(id)
 	if err != nil {
 		return types.ChainStatus{}, fmt.Errorf("%w: error getting chain status: %w", chains.ErrNotFound, err)
@@ -221,10 +294,9 @@ func (rs *CoreRelayerChainInteroperators) ChainStatus(ctx context.Context, id ty
 	return lr.GetChainStatus(ctx)
 }
 
-func (rs *CoreRelayerChainInteroperators) ChainStatuses(ctx context.Context, offset, limit int) ([]types.ChainStatus, int, error) {
-
+func (rs *CoreRelayerChainInteroperators) ChainStatuses(ctx context.Context, offset, limit int) ([]NetworkChainStatus, int, error) {
 	var (
-		stats    []types.ChainStatus
+		stats    []NetworkChainStatus
 		totalErr error
 	)
 	rs.mu.Lock()
@@ -244,7 +316,7 @@ func (rs *CoreRelayerChainInteroperators) ChainStatuses(ctx context.Context, off
 			totalErr = errors.Join(totalErr, err)
 			continue
 		}
-		stats = append(stats, stat)
+		stats = append(stats, NetworkChainStatus{ChainStatus: stat, Network: rid.Network})
 	}
 
 	if totalErr != nil {
@@ -280,7 +352,15 @@ func (rs *CoreRelayerChainInteroperators) NodeStatuses(ctx context.Context, offs
 		result   []types.NodeStatus
 	)
 	if len(relayerIDs) == 0 {
-		for _, lr := range rs.loopRelayers {
+		keys := slices.Collect(maps.Keys(rs.loopRelayers))
+		slices.SortFunc(keys, func(a, b types.RelayID) int {
+			if c := strings.Compare(a.Network, b.Network); c != 0 {
+				return c
+			}
+			return strings.Compare(a.ChainID, b.ChainID)
+		})
+		for _, key := range keys {
+			lr := rs.loopRelayers[key]
 			stats, _, total, err := lr.ListNodeStatuses(ctx, int32(limit), "")
 			if err != nil {
 				totalErr = errors.Join(totalErr, err)
@@ -309,10 +389,14 @@ func (rs *CoreRelayerChainInteroperators) NodeStatuses(ctx context.Context, offs
 	if totalErr != nil {
 		return nil, 0, totalErr
 	}
-	if len(result) > limit && limit > 0 {
-		return result[offset : offset+limit], count, nil
+	if len(result) < offset {
+		return nil, 0, nil
 	}
-	return result[offset:], count, nil
+	result = result[offset:]
+	if len(result) > limit && limit > 0 {
+		return result[:limit], count, nil
+	}
+	return result, count, nil
 }
 
 type FilterFn func(id types.RelayID) bool
@@ -329,10 +413,9 @@ func FilterRelayersByType(network string) func(id types.RelayID) bool {
 }
 
 // List returns all the [RelayerChainInteroperators] that match the [FilterFn].
-// A typical usage pattern to use [List] with [FilterByType] to obtain a set of [RelayerChainInteroperators]
+// A typical usage pattern to use [List] with [FilterRelayersByType] to obtain a set of [RelayerChainInteroperators]
 // for a given chain
 func (rs *CoreRelayerChainInteroperators) List(filter FilterFn) RelayerChainInteroperators {
-
 	matches := make(map[types.RelayID]loop.Relayer)
 	rs.mu.Lock()
 	for id, relayer := range rs.loopRelayers {
@@ -358,49 +441,3 @@ func (rs *CoreRelayerChainInteroperators) Slice() []loop.Relayer {
 func (rs *CoreRelayerChainInteroperators) Services() (s []services.ServiceCtx) {
 	return rs.srvs
 }
-
-// legacyChains encapsulates the chain-specific dependencies. Will be
-// deprecated when chain-specific logic is removed from products.
-type legacyChains struct {
-	EVMChains    legacyevm.LegacyChainContainer
-	CosmosChains LegacyCosmosContainer
-}
-
-// LegacyCosmosContainer is container interface for Cosmos chains
-type LegacyCosmosContainer interface {
-	Get(id string) (adapters.Chain, error)
-	Len() int
-	List(ids ...string) ([]adapters.Chain, error)
-	Slice() []adapters.Chain
-}
-
-type LegacyCosmos = chains.ChainsKV[adapters.Chain]
-
-var _ LegacyCosmosContainer = &LegacyCosmos{}
-
-func NewLegacyCosmos(m map[string]adapters.Chain) *LegacyCosmos {
-	return chains.NewChainsKV[adapters.Chain](m)
-}
-
-type CosmosLoopRelayerChainer interface {
-	loop.Relayer
-	Chain() adapters.Chain
-}
-
-type CosmosLoopRelayerChain struct {
-	loop.Relayer
-	chain adapters.Chain
-}
-
-func NewCosmosLoopRelayerChain(r *cosmos.Relayer, s adapters.Chain) *CosmosLoopRelayerChain {
-	ra := relay.NewServerAdapter(r, s)
-	return &CosmosLoopRelayerChain{
-		Relayer: ra,
-		chain:   s,
-	}
-}
-func (r *CosmosLoopRelayerChain) Chain() adapters.Chain {
-	return r.chain
-}
-
-var _ CosmosLoopRelayerChainer = &CosmosLoopRelayerChain{}

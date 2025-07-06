@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urfave/cli"
 
 	"github.com/smartcontractkit/chainlink/v2/core/build"
@@ -45,7 +46,7 @@ func NewApp(s *Shell) *cli.App {
 		},
 		cli.StringFlag{
 			Name:  "admin-credentials-file",
-			Usage: fmt.Sprintf("optional, applies only in client mode when making remote API calls. If provided, `FILE` containing admin credentials will be used for logging in, allowing to avoid an additional login step. If `FILE` is missing, it will be ignored. Defaults to %s", filepath.Join("<RootDir>", "apicredentials")),
+			Usage: "optional, applies only in client mode when making remote API calls. If provided, `FILE` containing admin credentials will be used for logging in, allowing to avoid an additional login step. If `FILE` is missing, it will be ignored. Defaults to " + filepath.Join("<RootDir>", "apicredentials"),
 		},
 		cli.StringFlag{
 			Name:  "remote-node-url",
@@ -85,6 +86,7 @@ func NewApp(s *Shell) *cli.App {
 		}
 
 		s.Logger = lggr
+		s.Registerer = prometheus.DefaultRegisterer // use the global DefaultRegisterer, should be safe since we only ever run one instance of the app per shell
 		s.CloseLogger = closeFn
 		s.Config = cfg
 
@@ -128,7 +130,6 @@ func NewApp(s *Shell) *cli.App {
 		}
 
 		return nil
-
 	}
 	app.After = func(c *cli.Context) error {
 		if s.CloseLogger != nil {
@@ -170,6 +171,10 @@ func NewApp(s *Shell) *cli.App {
 			Action: s.Health,
 			Flags: []cli.Flag{
 				cli.BoolFlag{
+					Name:  "failing, f",
+					Usage: "filter for failing services",
+				},
+				cli.BoolFlag{
 					Name:  "json, j",
 					Usage: "json output",
 				},
@@ -195,8 +200,9 @@ func NewApp(s *Shell) *cli.App {
 				keysCommand("Cosmos", NewCosmosKeysClient(s)),
 				keysCommand("Solana", NewSolanaKeysClient(s)),
 				keysCommand("StarkNet", NewStarkNetKeysClient(s)),
-				keysCommand("DKGSign", NewDKGSignKeysClient(s)),
-				keysCommand("DKGEncrypt", NewDKGEncryptKeysClient(s)),
+				keysCommand("Aptos", NewAptosKeysClient(s)),
+				keysCommand("Tron", NewTronKeysClient(s)),
+				keysCommand("TON", NewTONKeysClient(s)),
 
 				initVRFKeysSubCmd(s),
 			},
@@ -218,7 +224,7 @@ func NewApp(s *Shell) *cli.App {
 				},
 			},
 			Before: func(c *cli.Context) error {
-				errNoDuplicateFlags := fmt.Errorf("multiple commands with --config or --secrets flags. only one command may specify these flags. when secrets are used, they must be specific together in the same command")
+				errNoDuplicateFlags := errors.New("multiple commands with --config or --secrets flags. only one command may specify these flags. when secrets are used, they must be specific together in the same command")
 				if c.IsSet("config") {
 					if s.configFilesIsSet || s.secretsFileIsSet {
 						return errNoDuplicateFlags
@@ -262,6 +268,7 @@ func NewApp(s *Shell) *cli.App {
 					FileMaxSizeMB:  int(logFileMaxSizeMB),
 					FileMaxAgeDays: int(s.Config.Log().File().MaxAgeDays()),
 					FileMaxBackups: int(s.Config.Log().File().MaxBackups()),
+					SentryEnabled:  s.Config.Sentry().DSN() != "",
 				}
 				l, closeFn := lggrCfg.New()
 
@@ -286,25 +293,14 @@ func NewApp(s *Shell) *cli.App {
 			},
 		},
 		{
-			Name:  "chains",
-			Usage: "Commands for handling chain configuration",
-			Subcommands: cli.Commands{
-				chainCommand("EVM", EVMChainClient(s), cli.Int64Flag{Name: "id", Usage: "chain ID"}),
-				chainCommand("Cosmos", CosmosChainClient(s), cli.StringFlag{Name: "id", Usage: "chain ID"}),
-				chainCommand("Solana", SolanaChainClient(s),
-					cli.StringFlag{Name: "id", Usage: "chain ID, options: [mainnet, testnet, devnet, localnet]"}),
-				chainCommand("StarkNet", StarkNetChainClient(s), cli.StringFlag{Name: "id", Usage: "chain ID"}),
-			},
+			Name:        "chains",
+			Usage:       "Commands for handling chain configuration",
+			Subcommands: initChainSubCmds(s),
 		},
 		{
-			Name:  "nodes",
-			Usage: "Commands for handling node configuration",
-			Subcommands: cli.Commands{
-				initEVMNodeSubCmd(s),
-				initCosmosNodeSubCmd(s),
-				initSolanaNodeSubCmd(s),
-				initStarkNetNodeSubCmd(s),
-			},
+			Name:        "nodes",
+			Usage:       "Commands for handling node configuration",
+			Subcommands: initNodeSubCmds(s),
 		},
 		{
 			Name:        "forwarders",

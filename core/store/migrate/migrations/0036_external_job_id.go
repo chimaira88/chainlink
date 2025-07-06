@@ -10,10 +10,6 @@ import (
 	"github.com/pressly/goose/v3"
 )
 
-func init() {
-	goose.AddMigrationContext(Up36, Down36)
-}
-
 const (
 	up36_1 = `
 	ALTER TABLE direct_request_specs DROP COLUMN on_chain_job_spec_id;
@@ -35,7 +31,6 @@ const (
     `
 )
 
-// nolint
 func Up36(ctx context.Context, tx *sql.Tx) error {
 	// Add the external ID column and remove type specific ones.
 	if _, err := tx.ExecContext(ctx, up36_1); err != nil {
@@ -61,7 +56,6 @@ func Up36(ctx context.Context, tx *sql.Tx) error {
 		stmt += ` AS vals(external_job_id, id) WHERE vals.id = j.id`
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
-
 		}
 	}
 
@@ -72,10 +66,11 @@ func Up36(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// nolint
 func Down36(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, down36); err != nil {
 		return err
 	}
 	return nil
 }
+
+var Migration36 = goose.NewGoMigration(36, &goose.GoFunc{RunTx: Up36}, &goose.GoFunc{RunTx: Down36})

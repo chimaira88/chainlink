@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 
+	ccip "github.com/smartcontractkit/chainlink/v2/core/capabilities/ccip/validate"
 	"github.com/smartcontractkit/chainlink/v2/core/logger/audit"
 	"github.com/smartcontractkit/chainlink/v2/core/services/blockhashstore"
 	"github.com/smartcontractkit/chainlink/v2/core/services/blockheaderfeeder"
@@ -26,6 +27,7 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/validate"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocrbootstrap"
+	"github.com/smartcontractkit/chainlink/v2/core/services/standardcapabilities"
 	"github.com/smartcontractkit/chainlink/v2/core/services/streams"
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf/vrfcommon"
 	"github.com/smartcontractkit/chainlink/v2/core/services/webhook"
@@ -73,7 +75,7 @@ func (jc *JobsController) Show(c *gin.Context) {
 		jobSpec, err = jc.App.JobORM().FindJobByExternalJobID(ctx, externalJobID)
 	} else if pErr = jobSpec.SetID(c.Param("ID")); pErr == nil {
 		// Find a job by job ID
-		jobSpec, err = jc.App.JobORM().FindJobTx(ctx, jobSpec.ID)
+		jobSpec, err = jc.App.JobORM().FindJob(ctx, jobSpec.ID)
 	} else {
 		jsonAPIError(c, http.StatusUnprocessableEntity, pErr)
 		return
@@ -127,7 +129,7 @@ func (jc *JobsController) Create(c *gin.Context) {
 	if err == nil {
 		jc.App.GetAuditLogger().Audit(audit.JobCreated, map[string]interface{}{"job": string(jbj)})
 	} else {
-		jc.App.GetLogger().Errorf("Could not send audit log for JobCreation", "err", err)
+		jc.App.GetLogger().Errorw("Could not send audit log for JobCreation", "err", err)
 	}
 
 	jsonAPIResponse(c, presenters.NewJobResource(jb), jb.Type.String())
@@ -254,7 +256,11 @@ func (jc *JobsController) validateJobSpec(ctx context.Context, tomlString string
 	case job.Stream:
 		jb, err = streams.ValidatedStreamSpec(tomlString)
 	case job.Workflow:
-		jb, err = workflows.ValidatedWorkflowSpec(tomlString)
+		jb, err = workflows.ValidatedWorkflowJobSpec(ctx, tomlString)
+	case job.StandardCapabilities:
+		jb, err = standardcapabilities.ValidatedStandardCapabilitiesSpec(tomlString)
+	case job.CCIP:
+		jb, err = ccip.ValidatedCCIPSpec(tomlString)
 	default:
 		return jb, http.StatusUnprocessableEntity, errors.Errorf("unknown job type: %s", jobType)
 	}

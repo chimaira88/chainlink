@@ -17,16 +17,17 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	evmclimocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas"
-	gasmocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	txmmocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr/mocks"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/client/clienttest"
+	"github.com/smartcontractkit/chainlink-evm/pkg/gas"
+	gasmocks "github.com/smartcontractkit/chainlink-evm/pkg/gas/mocks"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils"
+	ubig "github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
+
+	txmmocks "github.com/smartcontractkit/chainlink/v2/common/txmgr/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest"
@@ -37,27 +38,26 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keeper"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
-	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 )
 
 func newHead() evmtypes.Head {
-	return evmtypes.NewHead(big.NewInt(20), utils.NewHash(), utils.NewHash(), 1000, ubig.NewI(0))
+	return evmtypes.NewHead(big.NewInt(20), utils.NewHash(), utils.NewHash(), ubig.NewI(0))
 }
 
 func mockEstimator(t *testing.T) gas.EvmFeeEstimator {
 	// note: estimator will only return 1 of legacy or dynamic fees (not both)
 	// assumed to call legacy estimator only
 	estimator := gasmocks.NewEvmFeeEstimator(t)
-	estimator.On("GetFee", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe().Return(gas.EvmFee{
-		Legacy: assets.GWei(60),
+	estimator.On("GetFee", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe().Return(gas.EvmFee{
+		GasPrice: assets.GWei(60),
 	}, uint32(60), nil)
 	return estimator
 }
 
-func setup(t *testing.T, estimator gas.EvmFeeEstimator, overrideFn func(c *chainlink.Config, s *chainlink.Secrets)) (
+func setup(t *testing.T, overrideFn func(c *chainlink.Config, s *chainlink.Secrets)) (
 	*sqlx.DB,
 	chainlink.GeneralConfig,
-	*evmclimocks.Client,
+	*clienttest.Client,
 	*keeper.UpkeepExecuter,
 	keeper.Registry,
 	keeper.UpkeepRegistration,
@@ -81,8 +81,16 @@ func setup(t *testing.T, estimator gas.EvmFeeEstimator, overrideFn func(c *chain
 	ethClient.On("IsL2").Return(false).Maybe()
 	ethClient.On("HeadByNumber", mock.Anything, mock.Anything).Maybe().Return(&evmtypes.Head{Number: 1, Hash: utils.NewHash()}, nil)
 	txm := txmmocks.NewMockEvmTxManager(t)
-	relayExtenders := evmtest.NewChainRelayExtenders(t, evmtest.TestChainOpts{TxManager: txm, DB: db, Client: ethClient, KeyStore: keyStore.Eth(), GeneralConfig: cfg, GasEstimator: estimator})
-	legacyChains := evmrelay.NewLegacyChainsFromRelayerExtenders(relayExtenders)
+	legacyChains := evmtest.NewLegacyChains(t, evmtest.TestChainOpts{
+		TxManager:      txm,
+		DB:             db,
+		Client:         ethClient,
+		KeyStore:       keyStore.Eth(),
+		ChainConfigs:   cfg.EVMConfigs(),
+		DatabaseConfig: cfg.Database(),
+		FeatureConfig:  cfg.Feature(),
+		ListenerConfig: cfg.Database().Listener(),
+	})
 	jpv2 := cltest.NewJobPipelineV2(t, cfg.WebServer(), cfg.JobPipeline(), legacyChains, db, keyStore, nil, nil)
 	ch := evmtest.MustGetDefaultChain(t, legacyChains)
 	orm := keeper.NewORM(db, logger.TestLogger(t))
@@ -117,7 +125,7 @@ var checkPerformResponse = struct {
 
 func Test_UpkeepExecuter_ErrorsIfStartedTwice(t *testing.T) {
 	t.Parallel()
-	_, _, _, executer, _, _, _, _, _, _, _, _ := setup(t, mockEstimator(t), nil)
+	_, _, _, executer, _, _, _, _, _, _, _, _ := setup(t, nil)
 	err := executer.Start(testutils.Context(t)) // already started in setup()
 	require.Error(t, err)
 }
@@ -128,7 +136,7 @@ func Test_UpkeepExecuter_PerformsUpkeep_Happy(t *testing.T) {
 	t.Parallel()
 
 	t.Run("runs upkeep on triggering block number", func(t *testing.T) {
-		db, config, ethMock, executer, registry, upkeep, job, jpv2, txm, _, _, _ := setup(t, mockEstimator(t),
+		db, config, ethMock, executer, registry, upkeep, job, jpv2, txm, _, _, _ := setup(t,
 			func(c *chainlink.Config, s *chainlink.Secrets) {
 				c.EVM[0].ChainID = (*ubig.Big)(testutils.SimulatedChainID)
 			})
@@ -173,7 +181,7 @@ func Test_UpkeepExecuter_PerformsUpkeep_Happy(t *testing.T) {
 
 	t.Run("runs upkeep on triggering block number on EIP1559 and non-EIP1559 chains", func(t *testing.T) {
 		runTest := func(t *testing.T, eip1559 bool) {
-			db, config, ethMock, executer, registry, upkeep, job, jpv2, txm, _, _, _ := setup(t, mockEstimator(t), func(c *chainlink.Config, s *chainlink.Secrets) {
+			db, config, ethMock, executer, registry, upkeep, job, jpv2, txm, _, _, _ := setup(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 				c.EVM[0].GasEstimator.EIP1559DynamicFees = &eip1559
 				c.EVM[0].ChainID = (*ubig.Big)(testutils.SimulatedChainID)
 			})
@@ -228,7 +236,7 @@ func Test_UpkeepExecuter_PerformsUpkeep_Happy(t *testing.T) {
 
 	t.Run("errors if submission key not found", func(t *testing.T) {
 		ctx := testutils.Context(t)
-		_, _, ethMock, executer, registry, _, job, jpv2, _, keyStore, _, _ := setup(t, mockEstimator(t), func(c *chainlink.Config, s *chainlink.Secrets) {
+		_, _, ethMock, executer, registry, _, job, jpv2, _, keyStore, _, _ := setup(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 			c.EVM[0].ChainID = (*ubig.Big)(testutils.SimulatedChainID)
 		})
 
@@ -262,7 +270,7 @@ func Test_UpkeepExecuter_PerformsUpkeep_Happy(t *testing.T) {
 	})
 
 	t.Run("errors if submission chain not found", func(t *testing.T) {
-		db, cfg, ethMock, _, _, _, _, jpv2, _, keyStore, ch, orm := setup(t, mockEstimator(t), nil)
+		db, cfg, ethMock, _, _, _, _, jpv2, _, keyStore, ch, orm := setup(t, nil)
 
 		registry, jb := cltest.MustInsertKeeperRegistry(t, db, orm, keyStore.Eth(), 0, 1, 20)
 		// change chain ID to non-configured chain
@@ -275,12 +283,12 @@ func Test_UpkeepExecuter_PerformsUpkeep_Happy(t *testing.T) {
 		head := newHead()
 		executer.OnNewLongestChain(testutils.Context(t), &head)
 		// TODO we want to see an errored run result once this is completed
-		// https://app.shortcut.com/chainlinklabs/story/25397/remove-failearly-flag-from-eth-call-task
+		// https://smartcontract-it.atlassian.net/browse/ARCHIVE-22186
 		cltest.AssertPipelineRunsStays(t, jb.PipelineSpecID, db, 0)
 	})
 
 	t.Run("triggers if heads are skipped but later heads arrive within range", func(t *testing.T) {
-		db, config, ethMock, executer, registry, upkeep, job, jpv2, txm, _, _, _ := setup(t, mockEstimator(t), func(c *chainlink.Config, s *chainlink.Secrets) {
+		db, config, ethMock, executer, registry, upkeep, job, jpv2, txm, _, _, _ := setup(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 			c.EVM[0].ChainID = (*ubig.Big)(testutils.SimulatedChainID)
 		})
 
@@ -322,7 +330,7 @@ func Test_UpkeepExecuter_PerformsUpkeep_Error(t *testing.T) {
 
 	g := gomega.NewWithT(t)
 
-	db, _, ethMock, executer, registry, _, _, _, _, _, _, _ := setup(t, mockEstimator(t),
+	db, _, ethMock, executer, registry, _, _, _, _, _, _, _ := setup(t,
 		func(c *chainlink.Config, s *chainlink.Secrets) {
 			c.EVM[0].ChainID = (*ubig.Big)(testutils.SimulatedChainID)
 		})
@@ -336,12 +344,12 @@ func Test_UpkeepExecuter_PerformsUpkeep_Error(t *testing.T) {
 	head := newHead()
 	executer.OnNewLongestChain(testutils.Context(t), &head)
 
-	g.Eventually(wasCalled.Load).Should(gomega.Equal(true))
+	g.Eventually(wasCalled.Load).Should(gomega.BeTrue())
 
 	txStore := txmgr.NewTxStore(db, logger.TestLogger(t))
 	txes, err := txStore.GetAllTxes(testutils.Context(t))
 	require.NoError(t, err)
-	require.Len(t, txes, 0)
+	require.Empty(t, txes)
 }
 
 func ptr[T any](t T) *T { return &t }

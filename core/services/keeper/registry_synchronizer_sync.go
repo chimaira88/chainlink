@@ -8,9 +8,9 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
+	"github.com/smartcontractkit/chainlink-evm/pkg/types"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
 )
 
 func (rs *RegistrySynchronizer) fullSync(ctx context.Context) {
@@ -44,7 +44,7 @@ func (rs *RegistrySynchronizer) syncRegistry(ctx context.Context) (Registry, err
 }
 
 func (rs *RegistrySynchronizer) fullSyncUpkeeps(ctx context.Context, reg Registry) error {
-	activeUpkeepIDs, err := rs.registryWrapper.GetActiveUpkeepIDs(nil)
+	activeUpkeepIDs, err := rs.registryWrapper.GetActiveUpkeepIDs(ctx, nil)
 	if err != nil {
 		return errors.Wrap(err, "unable to get active upkeep IDs")
 	}

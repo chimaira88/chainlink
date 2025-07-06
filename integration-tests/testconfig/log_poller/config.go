@@ -5,12 +5,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 
-	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
-)
-
-const (
-	ErrReadPerfConfig      = "failed to read TOML config for performance tests"
-	ErrUnmarshalPerfConfig = "failed to unmarshal TOML config for performance tests"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/blockchain"
 )
 
 type GeneratorType = string
@@ -90,13 +85,11 @@ func (l *LoopedConfig) Validate() error {
 }
 
 type General struct {
-	Generator                 *string                 `toml:"generator"`
-	EventsToEmit              []abi.Event             `toml:"-"`
-	Contracts                 *int                    `toml:"contracts"`
-	EventsPerTx               *int                    `toml:"events_per_tx"`
-	UseFinalityTag            *bool                   `toml:"use_finality_tag"`
-	BackupLogPollerBlockDelay *uint64                 `toml:"backup_log_poller_block_delay"`
-	LogPollInterval           *blockchain.StrDuration `toml:"log_poll_interval"`
+	Generator      *string     `toml:"generator"`
+	EventsToEmit   []abi.Event `toml:"-"`
+	Contracts      *int        `toml:"contracts"`
+	EventsPerTx    *int        `toml:"events_per_tx"`
+	UseFinalityTag *bool       `toml:"use_finality_tag"`
 }
 
 func (g *General) Validate() error {

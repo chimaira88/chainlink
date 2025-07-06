@@ -13,7 +13,7 @@ import (
 	"github.com/smartcontractkit/libocr/gethwrappers/offchainaggregator"
 	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting/types"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/pgtest"
@@ -172,7 +172,7 @@ func assertPendingTransmissionEqual(t *testing.T, pt1, pt2 ocrtypes.PendingTrans
 	require.Equal(t, pt1.Rs, pt2.Rs)
 	require.Equal(t, pt1.Ss, pt2.Ss)
 	assert.True(t, bytes.Equal(pt1.Vs[:], pt2.Vs[:]))
-	assert.True(t, bytes.Equal(pt1.SerializedReport[:], pt2.SerializedReport[:]))
+	assert.True(t, bytes.Equal(pt1.SerializedReport, pt2.SerializedReport))
 	assert.Equal(t, pt1.Median, pt2.Median)
 	for i := range pt1.Ss {
 		assert.True(t, bytes.Equal(pt1.Ss[i][:], pt2.Ss[i][:]))
@@ -287,7 +287,7 @@ func Test_DB_PendingTransmissions(t *testing.T) {
 		// No keys for this oracleSpecID yet
 		m, err = odb2.PendingTransmissionsWithConfigDigest(testutils.Context(t), configDigest)
 		require.NoError(t, err)
-		require.Len(t, m, 0)
+		require.Empty(t, m)
 	})
 
 	t.Run("deletes pending transmission by key", func(t *testing.T) {

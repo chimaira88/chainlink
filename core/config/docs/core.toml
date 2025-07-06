@@ -1,6 +1,9 @@
 # **ADVANCED**
 # InsecureFastScrypt causes all key stores to encrypt using "fast" scrypt params instead. This is insecure and only useful for local testing. DO NOT ENABLE THIS IN PRODUCTION.
 InsecureFastScrypt = false # Default
+# **ADVANCED**
+# InsecurePPROFHeap allows dumping the heap in pprof. This is very useful for debugging memory leaks but in certain rare cases may potentially expose sensitive data e.g. private key components, so is disabled by default.
+InsecurePPROFHeap = false # Default
 # RootDir is the Chainlink node's root directory. This is the default directory for logging, database backups, cookies, and other misc Chainlink node files. Chainlink nodes will always ensure this directory has 700 permissions because it might contain sensitive data.
 RootDir = '~/.chainlink' # Default
 # ShutdownGracePeriod is the maximum time allowed to shut down gracefully. If exceeded, the node will terminate immediately to avoid being SIGKILLed.
@@ -13,6 +16,10 @@ FeedsManager = true # Default
 LogPoller = false # Default
 # UICSAKeys enables CSA Keys in the UI.
 UICSAKeys = false # Default
+# CCIP enables the CCIP service.
+CCIP = true # Default
+# MultiFeedsManagers enables support for multiple feeds manager connections.
+MultiFeedsManagers = false # Default
 
 [Database]
 # DefaultIdleInTxSessionTimeout is the maximum time allowed for a transaction to be open and idle before timing out. See Postgres `idle_in_transaction_session_timeout` for more details.
@@ -85,7 +92,7 @@ LeaseRefreshInterval = '1s' # Default
 
 [TelemetryIngress]
 # UniConn toggles which ws connection style is used.
-UniConn = true # Default
+UniConn = false # Default
 # Logging toggles verbose logging of the raw telemetry messages being sent.
 Logging = false # Default
 # BufferSize is the number of telemetry messages to buffer before dropping new ones.
@@ -120,7 +127,7 @@ JsonWrapperKey = 'event' # Example
 Headers = ['Authorization: token', 'X-SomeOther-Header: value with spaces | and a bar+*'] # Example
 
 [Log]
-# Level determines both what is printed on the screen and what is written to the log file.
+# Level determines only what is printed on the screen/console. This configuration does not apply to the logs that are recorded in a file (see [`Log.File`](#logfile) for more details).
 #
 # The available levels are:
 #  - "debug": Useful for forensic debugging of issues.
@@ -141,7 +148,7 @@ UnixTS = false # Default
 [Log.File]
 # Dir sets the log directory. By default, Chainlink nodes write log data to `$ROOT/log.jsonl`.
 Dir = '/my/log/directory' # Example
-# MaxSize determines the log file's max size in megabytes before file rotation. Having this not set will disable logging to disk. If your disk doesn't have enough disk space, the logging will pause and the application will log errors until space is available again.
+# MaxSize determines the log file's max size before file rotation. Having this not set or set to a value smaller than 1Mb will disable logging to disk. If your disk doesn't have enough disk space, the logging will pause and the application will log errors until space is available again.
 #
 # Values must have suffixes with a unit like: `5120mb` (5,120 megabytes). If no unit suffix is provided, the value defaults to `b` (bytes). The list of valid unit suffixes are:
 #
@@ -188,6 +195,31 @@ HTTPMaxSize = '32768b' # Default
 StartTimeout = '15s' # Default
 # ListenIP specifies the IP to bind the HTTP server to
 ListenIP = '0.0.0.0' # Default
+
+# Optional OIDC config if WebServer.AuthenticationMethod is set to 'oidc'
+[WebServer.OIDC]
+# ClientID is the ID of the OIDC application registered with the identity provider
+ClientID = 'abcd1234' # Example
+# ProviderURL is the base URL for your OIDC Identity provider. 
+ProviderURL = 'https://id[.]example[.]com/oauth2/default' # Example
+# RedirectURL will always be <NODE_BASE_URL>/signin. This needs to match the configuration on the provider side.
+RedirectURL = 'http://localhost:8080/signin' # Example
+# ClaimName is the name of the field in the id_token where to find the user's ID claims.
+ClaimName = 'groups' # Default
+# AdminClaim is string label of the id claim that maps the core node's 'Admin' role
+AdminClaim = 'NodeAdmins' # Default
+# EditClaim is string label of the id claim that maps the core node's 'Edit' role
+EditClaim = 'NodeEditors' # Default
+# RunClaim is string label of the id claim that maps the core node's 'Run' role
+RunClaim = 'NodeRunners' # Default
+# ReadClaim is string label of the id claim that maps the core node's 'Read' role
+ReadClaim = 'NodeReadOnly' # Default
+# SessionTimeout determines the amount of idle time to elapse before session cookies expire. This signs out GUI users from their sessions.
+SessionTimeout = '15m0s' # Default
+# UserAPITokenEnabled enables the users to issue API tokens with the same access of their role
+UserAPITokenEnabled = false # Default
+# UserAPITokenDuration is the duration of time an API token is active for before expiring
+UserAPITokenDuration = '240h0m0s' # Default
 
 # Optional LDAP config if WebServer.AuthenticationMethod is set to 'ldap'
 # LDAP queries are all parameterized to support custom LDAP 'dn', 'cn', and attributes 
@@ -355,6 +387,8 @@ KeyBundleID = '7a5f66bbe6594259325bf2b4f5b1a9c900000000000000000000000000000000'
 CaptureEATelemetry = false # Default
 # CaptureAutomationCustomTelemetry toggles collecting automation specific telemetry
 CaptureAutomationCustomTelemetry = true # Default
+# AllowNoBootstrappers enables single-node consensus without bootstrapper nodes (i.e. f=0, n=1)
+AllowNoBootstrappers = false # Default
 # DefaultTransactionQueueDepth controls the queue size for `DropOldestStrategy` in OCR2. Set to 0 to use `SendEvery` strategy instead.
 DefaultTransactionQueueDepth = 1 # Default
 # SimulateTransactions enables transaction simulation for OCR2.
@@ -395,6 +429,8 @@ TransmitterAddress = '0xa0788FC17B1dEe36f057c42B6F373A34B014687e' # Example
 CaptureEATelemetry = false # Default
 # TraceLogging enables trace level logging.
 TraceLogging = false # Default
+# ConfigLogValidation ensures contract configuration logs are accessible when validating OCR jobs. Enable this when using RPC providers that don't maintain complete historical logs.
+ConfigLogValidation = false # Default
 
 # P2P has a versioned networking stack. Currenly only `[P2P.V2]` is supported.
 # All nodes in the OCR network should share the same networking stack.
@@ -440,6 +476,64 @@ DeltaReconcile = '1m' # Default
 # but the host and port must be fully specified and cannot be empty. You can specify `0.0.0.0` (IPv4) or `::` (IPv6) to listen on all interfaces, but that is not recommended.
 ListenAddresses = ['1.2.3.4:9999', '[a52d:0:a88:1274::abcd]:1337'] # Example
 
+[Capabilities.RateLimit]
+# GlobalRPS is the global rate limit for the dispatcher.
+GlobalRPS = 200 # Default
+# GlobalBurst is the global burst limit for the dispatcher.
+GlobalBurst = 200 # Default
+# PerSenderRPS is the per-sender rate limit for the dispatcher.
+PerSenderRPS = 200 # Default
+# PerSenderBurst is the per-sender burst limit for the dispatcher.
+PerSenderBurst = 200 # Default
+
+[Capabilities.WorkflowRegistry]
+# Address is the address for the workflow registry contract.
+Address = '0x0' # Example
+# NetworkID identifies the target network where the remote registry is located.
+NetworkID = 'evm' # Default
+# ChainID identifies the target chain id where the remote registry is located.
+ChainID = '1' # Default
+# MaxBinarySize is the maximum size of a binary that can be fetched from the registry.
+MaxBinarySize = '20.00mb' # Default
+# MaxEncryptedSecretsSize is the maximum size of encrypted secrets that can be fetched from the given secrets url.
+MaxEncryptedSecretsSize = '26.40kb' # Default
+# MaxConfigSize is the maximum size of a config that can be fetched from the given config url.
+MaxConfigSize = '50.00kb' # Default
+# SyncStrategy is the strategy that will be used to bring the node up to date with the latest Workflow Registry contract state.
+# Options are: event which watches for contract events or reconciliation which diffs workflow metadata state.
+SyncStrategy = 'event' # Default
+
+[Workflows]
+[Workflows.Limits]
+# Global is the maximum number of workflows that can be registered globally.
+Global = 200 # Default
+# PerOwner is the maximum number of workflows that can be registered per owner.
+PerOwner = 200 # Default
+
+[Capabilities.ExternalRegistry]
+# Address is the address for the capabilities registry contract.
+Address = '0x0' # Example
+# NetworkID identifies the target network where the remote registry is located.
+NetworkID = 'evm' # Default
+# ChainID identifies the target chain id where the remote registry is located.
+ChainID = '1' # Default
+
+[Capabilities.Dispatcher]
+# SupportedVersion is the version of the version of message schema.
+SupportedVersion = 1 # Default
+# ReceiverBufferSize is the size of the buffer for incoming messages.
+ReceiverBufferSize = 10000 # Default
+
+[Capabilities.Dispatcher.RateLimit]
+# GlobalRPS is the global rate limit for the dispatcher.
+GlobalRPS = 800 # Default
+# GlobalBurst is the global burst limit for the dispatcher.
+GlobalBurst = 1000 # Default
+# PerSenderRPS is the per-sender rate limit for the dispatcher.
+PerSenderRPS = 10 # Default
+# PerSenderBurst is the per-sender burst limit for the dispatcher.
+PerSenderBurst = 50 # Default
+
 [Capabilities.Peering]
 # IncomingMessageBufferSize is the per-remote number of incoming
 # messages to buffer. Any additional messages received on top of those
@@ -480,6 +574,26 @@ DeltaReconcile = '1m' # Default
 # ListenAddresses is the addresses the peer will listen to on the network in `host:port` form as accepted by `net.Listen()`, 
 # but the host and port must be fully specified and cannot be empty. You can specify `0.0.0.0` (IPv4) or `::` (IPv6) to listen on all interfaces, but that is not recommended.
 ListenAddresses = ['1.2.3.4:9999', '[a52d:0:a88:1274::abcd]:1337'] # Example
+
+[Capabilities.GatewayConnector]
+# ChainIDForNodeKey is the ChainID of the network associated with a private key to be used for authentication with Gateway nodes
+ChainIDForNodeKey = '11155111' # Example
+# NodeAddress is the address of the desired private key to be used for authentication with Gateway nodes
+NodeAddress = '0x68902d681c28119f9b2531473a417088bf008e59' # Example
+# DonID is the Id of the Don
+DonID = 'example_don' # Example
+# WSHandshakeTimeoutMillis is Websocket handshake timeout
+WSHandshakeTimeoutMillis = 1000 # Example
+# AuthMinChallengeLen is the minimum number of bytes in authentication challenge payload
+AuthMinChallengeLen = 10 # Example
+# AuthTimestampToleranceSec is Authentication timestamp tolerance
+AuthTimestampToleranceSec = 10 # Example
+
+[[Capabilities.GatewayConnector.Gateways]]
+# ID of the Gateway
+ID = 'example_gateway' # Example
+# URL of the Gateway
+URL = 'wss://localhost:8081/node' # Example
 
 [Keeper]
 # **ADVANCED**
@@ -597,6 +711,11 @@ env = 'test' # Example
 
 [Mercury]
 
+# VerboseLogging enables detailed logging of mercury/LLO operations. These logs
+# can be expensive since they may serialize large structs, so they are disabled
+# by default.
+VerboseLogging = false # Default
+
 # Mercury.Cache controls settings for the price retrieval cache querying a mercury server
 [Mercury.Cache]
 # LatestReportTTL controls how "stale" we will allow a price to be e.g. if
@@ -625,14 +744,69 @@ CertFile = "/path/to/client/certs.pem" # Example
 
 # Mercury.Transmitter controls settings for the mercury transmitter
 [Mercury.Transmitter]
+# Protocol is the protocol to use for the transmitter.
+#
+# Options are either:
+# - "wsrpc" for the legacy websocket protocol
+# - "grpc" for the gRPC protocol
+Protocol = "grpc" # Default
 # TransmitQueueMaxSize controls the size of the transmit queue. This is scoped
 # per OCR instance. If the queue is full, the transmitter will start dropping
 # the oldest messages in order to make space.
 #
 # This is useful if mercury server goes offline and the nop needs to buffer
 # transmissions.
-TransmitQueueMaxSize = 10_000 # Default
+TransmitQueueMaxSize = 250_000 # Default
 # TransmitTimeout controls how long the transmitter will wait for a response
 # when sending a message to the mercury server, before aborting and considering
 # the transmission to be failed.
 TransmitTimeout = "5s" # Default
+# TransmitConcurrency is the max number of concurrent transmits to each server.
+#
+# Only has effect with LLO jobs.
+TransmitConcurrency = 100 # Default
+# ReaperFrequency controls how often the stale transmission reaper will run.
+# Setting to 0 disables the reaper.
+ReaperFrequency = "1h" # Default
+# ReaperMaxAge controls how old a transmission can be before it is considered
+# stale. Setting to 0 disables the reaper.
+ReaperMaxAge = "48h" # Default
+
+# Telemetry holds OTEL settings.
+# This data includes open telemetry metrics, traces, & logs.
+# It does not currently include prometheus metrics or standard out logs, but may in the future.
+[Telemetry]
+# Enabled turns telemetry collection on or off.
+Enabled = false # Default
+# Endpoint of the OTEL Collector.
+Endpoint = 'example.com/collector' # Example
+# CACertFile is the file path of the TLS certificate used for secure communication with the OTEL Collector.
+# Required unless InescureConnection is true.
+CACertFile = 'cert-file' # Example
+# InsecureConnection bypasses the TLS CACertFile requirement and uses an insecure connection instead.
+# Only available in dev mode.
+InsecureConnection = false # Default
+# TraceSampleRatio is the rate at which to sample traces. Must be between 0 and 1.
+TraceSampleRatio = 0.01 # Default
+# EmitterBatchProcessor enables batching for telemetry events
+EmitterBatchProcessor = true # Default
+# EmitterExportTimeout sets timeout for exporting telemetry events
+EmitterExportTimeout = '1s' # Default
+# ChipIngressEndpoint enables sending custom messages to CHIP Ingress.
+ChipIngressEndpoint = '' # Default
+
+# ResourceAttributes are global metadata to include with all telemetry.
+[Telemetry.ResourceAttributes]
+# foo is an example resource attribute
+foo = "bar" # Example
+
+[CRE.Streams]
+# WsURL is the websockets url for the streams sdk config
+WsURL = "streams.url" # Example
+# RestURL is the REST url for the streams sdk config
+RestURL = "streams.url" # Example
+
+# Billing holds settings for connecting to the billing service.
+[Billing]
+# URL is the locator for the Chainlink billing service.
+URL = "localhost:4319" # Default

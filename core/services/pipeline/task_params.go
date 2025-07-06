@@ -17,8 +17,6 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
-//go:generate mockery --quiet --name PipelineParamUnmarshaler --output ./mocks/ --case=underscore
-
 type PipelineParamUnmarshaler interface {
 	UnmarshalPipelineParam(val interface{}) error
 }
@@ -510,7 +508,6 @@ func (m *MapParam) UnmarshalPipelineParam(val interface{}) error {
 			*m = v.MapValue
 			return nil
 		}
-
 	}
 
 	return errors.Wrapf(ErrBadInput, "expected map, got %T", val)
@@ -557,6 +554,19 @@ func (s SliceParam) FilterErrors() (SliceParam, int) {
 		}
 	}
 	return s2, errs
+}
+
+func (s SliceParam) FilterNils() (SliceParam, int) {
+	var s2 SliceParam
+	var nils int
+	for _, x := range s {
+		if x == nil {
+			nils++
+		} else {
+			s2 = append(s2, x)
+		}
+	}
+	return s2, nils
 }
 
 type DecimalSliceParam []decimal.Decimal

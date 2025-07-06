@@ -9,13 +9,21 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v4"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
+	"github.com/smartcontractkit/chainlink-evm/pkg/config/toml"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
 )
+
+func TestAtrributesAttribute(t *testing.T) {
+	a := `ds1 [type=http method=GET tags=<{"attribute1":"value1", "attribute2":42}>];`
+	p, err := pipeline.Parse(a)
+	require.NoError(t, err)
+	task := p.Tasks[0]
+	assert.JSONEq(t, "{\"attribute1\":\"value1\", \"attribute2\":42}", task.TaskTags())
+}
 
 func TestTimeoutAttribute(t *testing.T) {
 	t.Parallel()
@@ -25,14 +33,14 @@ func TestTimeoutAttribute(t *testing.T) {
 	require.NoError(t, err)
 	timeout, set := p.Tasks[0].TaskTimeout()
 	assert.Equal(t, cltest.MustParseDuration(t, "10s"), timeout)
-	assert.Equal(t, true, set)
+	assert.True(t, set)
 
 	a = `ds1 [type=http method=GET url="https://chain.link/voter_turnout/USA-2020" requestData=<{"hi": "hello"}>];`
 	p, err = pipeline.Parse(a)
 	require.NoError(t, err)
 	timeout, set = p.Tasks[0].TaskTimeout()
 	assert.Equal(t, cltest.MustParseDuration(t, "0s"), timeout)
-	assert.Equal(t, false, set)
+	assert.False(t, set)
 }
 
 func TestTaskHTTPUnmarshal(t *testing.T) {
@@ -56,7 +64,7 @@ func TestTaskAnyUnmarshal(t *testing.T) {
 	require.Len(t, p.Tasks, 1)
 	_, ok := p.Tasks[0].(*pipeline.AnyTask)
 	require.True(t, ok)
-	require.Equal(t, true, p.Tasks[0].Base().FailEarly)
+	require.True(t, p.Tasks[0].Base().FailEarly)
 }
 
 func TestRetryUnmarshal(t *testing.T) {
@@ -205,7 +213,7 @@ func TestCheckInputs(t *testing.T) {
 			outputs, err := pipeline.CheckInputs(test.pr, test.minLen, test.maxLen, test.maxErrors)
 			if test.err == nil {
 				assert.NoError(t, err)
-				assert.Equal(t, test.outputsLen, len(outputs))
+				assert.Len(t, outputs, test.outputsLen)
 			} else {
 				assert.Equal(t, test.err, errors.Cause(err))
 			}
@@ -309,15 +317,80 @@ func TestGetNextTaskOf(t *testing.T) {
 
 	firstTask := trrs[0]
 	nextTask := trrs.GetNextTaskOf(firstTask)
-	assert.Equal(t, nextTask.Task.ID(), 2)
+	assert.Equal(t, 2, nextTask.Task.ID())
 
 	nextTask = trrs.GetNextTaskOf(*nextTask)
-	assert.Equal(t, nextTask.Task.ID(), 3)
+	assert.Equal(t, 3, nextTask.Task.ID())
 
 	nextTask = trrs.GetNextTaskOf(*nextTask)
-	assert.Equal(t, nextTask.Task.ID(), 4)
+	assert.Equal(t, 4, nextTask.Task.ID())
 
 	nextTask = trrs.GetNextTaskOf(*nextTask)
 	assert.Empty(t, nextTask)
+}
 
+func TestGetDescendantTasks(t *testing.T) {
+	t.Parallel()
+
+	t.Run("GetDescendantTasks with multiple levels of tasks", func(t *testing.T) {
+		l3T2 := pipeline.AnyTask{
+			BaseTask: pipeline.NewBaseTask(6, "l3T2", nil, nil, 1),
+		}
+		l3T1 := pipeline.MedianTask{
+			BaseTask: pipeline.NewBaseTask(5, "l3T1", nil, nil, 1),
+		}
+		l2T1 := pipeline.MultiplyTask{
+			BaseTask: pipeline.NewBaseTask(4, "l2T1", nil, []pipeline.Task{&l3T1, &l3T2}, 1),
+		}
+		l1T1 := pipeline.JSONParseTask{
+			BaseTask: pipeline.NewBaseTask(3, "l1T1", nil, []pipeline.Task{&l2T1}, 2),
+		}
+		l1T2 := pipeline.JSONParseTask{
+			BaseTask: pipeline.NewBaseTask(2, "l1T2", nil, nil, 3),
+		}
+		l1T3 := pipeline.JSONParseTask{
+			BaseTask: pipeline.NewBaseTask(1, "l1T3", nil, nil, 4),
+		}
+
+		baseTask := pipeline.BridgeTask{
+			Name:     "bridge-task",
+			BaseTask: pipeline.NewBaseTask(0, "baseTask", nil, []pipeline.Task{&l1T1, &l1T2, &l1T3}, 0),
+		}
+
+		descendents := baseTask.GetDescendantTasks()
+		assert.Len(t, descendents, 6)
+	})
+
+	t.Run("GetDescendantTasks with duplicate tasks defined", func(t *testing.T) {
+		l2T1 := pipeline.JSONParseTask{
+			BaseTask: pipeline.NewBaseTask(2, "l1T2", nil, nil, 3),
+		}
+		l1T1 := pipeline.JSONParseTask{
+			BaseTask: pipeline.NewBaseTask(1, "l1T2", nil, []pipeline.Task{&l2T1, &l2T1, &l2T1}, 3),
+		}
+		taskWithRepeats := pipeline.BridgeTask{
+			Name:     "bridge-task",
+			BaseTask: pipeline.NewBaseTask(0, "taskWithRepeats", nil, []pipeline.Task{&l1T1, &l1T1, &l1T1}, 0),
+		}
+		descendents := taskWithRepeats.GetDescendantTasks()
+		assert.Len(t, descendents, 2)
+	})
+
+	t.Run("GetDescendantTasks with nil output tasks", func(t *testing.T) {
+		taskWithRepeats := pipeline.BridgeTask{
+			Name:     "bridge-task",
+			BaseTask: pipeline.NewBaseTask(0, "taskWithRepeats", nil, nil, 0),
+		}
+		descendents := taskWithRepeats.GetDescendantTasks()
+		assert.Empty(t, descendents)
+	})
+
+	t.Run("GetDescendantTasks with empty list of output tasks", func(t *testing.T) {
+		taskWithRepeats := pipeline.BridgeTask{
+			Name:     "bridge-task",
+			BaseTask: pipeline.NewBaseTask(0, "taskWithRepeats", nil, []pipeline.Task{}, 0),
+		}
+		descendents := taskWithRepeats.GetDescendantTasks()
+		assert.Empty(t, descendents)
+	})
 }

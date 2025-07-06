@@ -4,11 +4,14 @@ import (
 	"context"
 	"math/big"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/types"
 	commontypes "github.com/smartcontractkit/chainlink-common/pkg/types"
 )
 
 type MockRelayer struct {
+	Head         commontypes.Head
 	ChainStatus  commontypes.ChainStatus
+	ChainInfo    commontypes.ChainInfo
 	NodeStatuses []commontypes.NodeStatus
 }
 
@@ -32,8 +35,28 @@ func (m MockRelayer) HealthReport() map[string]error {
 	panic("not implemented")
 }
 
+func (m MockRelayer) NewContractWriter(_ context.Context, _ []byte) (commontypes.ContractWriter, error) {
+	panic("not implemented")
+}
+
+func (m MockRelayer) NewContractReader(_ context.Context, _ []byte) (commontypes.ContractReader, error) {
+	panic("not implemented")
+}
+
+func (m MockRelayer) EVM() (types.EVMService, error) {
+	panic("not implemented")
+}
+
+func (m MockRelayer) LatestHead(_ context.Context) (commontypes.Head, error) {
+	return m.Head, nil
+}
+
 func (m MockRelayer) GetChainStatus(ctx context.Context) (commontypes.ChainStatus, error) {
 	return m.ChainStatus, nil
+}
+
+func (m MockRelayer) GetChainInfo(_ context.Context) (commontypes.ChainInfo, error) {
+	panic("not implemented")
 }
 
 func (m MockRelayer) ListNodeStatuses(ctx context.Context, pageSize int32, pageToken string) (stats []commontypes.NodeStatus, nextPageToken string, total int, err error) {
@@ -41,6 +64,10 @@ func (m MockRelayer) ListNodeStatuses(ctx context.Context, pageSize int32, pageT
 }
 
 func (m MockRelayer) Transact(ctx context.Context, from, to string, amount *big.Int, balanceCheck bool) error {
+	panic("not implemented")
+}
+
+func (m MockRelayer) Replay(ctx context.Context, fromBlock string, args map[string]any) error {
 	panic("not implemented")
 }
 

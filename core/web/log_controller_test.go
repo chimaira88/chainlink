@@ -48,12 +48,11 @@ func TestLogController_GetLogConfig(t *testing.T) {
 
 	svcLogConfig := presenters.ServiceLogConfigResource{}
 	cltest.AssertServerResponse(t, resp, http.StatusOK)
-	require.NoError(t, cltest.ParseJSONAPIResponse(t, resp, &svcLogConfig))
+	cltest.ParseJSONAPIResponse(t, resp, &svcLogConfig)
 
 	require.Equal(t, "warn", svcLogConfig.DefaultLogLevel)
 
 	for i, svcName := range svcLogConfig.ServiceName {
-
 		if svcName == "Global" {
 			assert.Equal(t, zapcore.WarnLevel.String(), svcLogConfig.LogLevel[i])
 		}
@@ -127,10 +126,9 @@ func TestLogController_PatchLogConfig(t *testing.T) {
 				cltest.AssertServerResponse(t, resp, tc.expectedErrorCode)
 			} else {
 				cltest.AssertServerResponse(t, resp, http.StatusOK)
-				require.NoError(t, cltest.ParseJSONAPIResponse(t, resp, &svcLogConfig))
+				cltest.ParseJSONAPIResponse(t, resp, &svcLogConfig)
 
 				for i, svcName := range svcLogConfig.ServiceName {
-
 					if svcName == "Global" {
 						assert.Equal(t, tc.expectedLogLevel.String(), svcLogConfig.LogLevel[i])
 					}

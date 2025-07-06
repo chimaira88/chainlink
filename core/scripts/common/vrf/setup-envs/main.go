@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,13 +15,13 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/urfave/cli"
 
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrf_coordinator_v2"
 	helpers "github.com/smartcontractkit/chainlink/core/scripts/common"
 	"github.com/smartcontractkit/chainlink/core/scripts/common/vrf/constants"
 	"github.com/smartcontractkit/chainlink/core/scripts/common/vrf/model"
 	"github.com/smartcontractkit/chainlink/core/scripts/vrfv2/testnet/v2scripts"
 	"github.com/smartcontractkit/chainlink/core/scripts/vrfv2plus/testnet/v2plusscripts"
 	clcmd "github.com/smartcontractkit/chainlink/v2/core/cmd"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_coordinator_v2"
 	"github.com/smartcontractkit/chainlink/v2/core/web/presenters"
 )
 
@@ -52,7 +53,6 @@ var (
 )
 
 func main() {
-
 	vrfPrimaryNodeURL := flag.String("vrf-primary-node-url", "", "remote node URL")
 	vrfBackupNodeURL := flag.String("vrf-backup-node-url", "", "remote node URL")
 	bhsNodeURL := flag.String("bhs-node-url", "", "remote node URL")
@@ -83,6 +83,7 @@ func main() {
 	bhsJobRunTimeout := flag.String("bhs-job-run-timeout", "1m", "")
 
 	vrfVersion := flag.String("vrf-version", "v2", "VRF version to use")
+	coordinatorType := flag.String("coordinator-type", "", "Specify which coordinator type to use: layer1, arbitrum, optimism")
 	deployContractsAndCreateJobs := flag.Bool("deploy-contracts-and-create-jobs", false, "whether to deploy contracts and create jobs")
 
 	subscriptionBalanceJuelsString := flag.String("subscription-balance", constants.SubscriptionBalanceJuels, "amount to fund subscription with Link token (Juels)")
@@ -109,6 +110,10 @@ func main() {
 	linkPremiumPercentage := flag.Int64("link-premium-percentage", 1, "premium percentage for LINK payment")
 	simulationBlock := flag.String("simulation-block", "pending", "simulation block can be 'pending' or 'latest'")
 
+	// only necessary for Optimism coordinator contract
+	optimismL1GasFeeCalculationMode := flag.Uint64("optimism-l1-fee-mode", 0, "Choose Optimism coordinator contract L1 fee calculation mode: 0, 1, 2")
+	optimismL1GasFeeCoefficient := flag.Uint64("optimism-l1-fee-coefficient", 100, "Choose Optimism coordinator contract L1 fee coefficient percentage [1, 100]")
+
 	e := helpers.SetupEnv(false)
 	flag.Parse()
 	nodesMap := make(map[string]model.Node)
@@ -118,8 +123,13 @@ func main() {
 	}
 	fmt.Println("Using VRF Version:", *vrfVersion)
 
+	if *coordinatorType != "layer1" && *coordinatorType != "arbitrum" && *coordinatorType != "optimism" {
+		panic(fmt.Sprintf("Invalid Coordinator type `%s`. Only `layer1`, `arbitrum` and `optimism` are supported", *coordinatorType))
+	}
+	fmt.Println("Using Coordinator type:", *coordinatorType)
+
 	if *simulationBlock != "pending" && *simulationBlock != "latest" {
-		helpers.PanicErr(fmt.Errorf("simulation block must be 'pending' or 'latest'"))
+		helpers.PanicErr(errors.New("simulation block must be 'pending' or 'latest'"))
 	}
 
 	fundingAmount := decimal.RequireFromString(*nodeSendingKeyFundingAmount).BigInt()
@@ -198,7 +208,6 @@ func main() {
 	importVRFKeyToNodeIfSet(vrfBackupNodeURL, nodesMap, output, nodesMap[model.VRFBackupNodeName].CredsFile)
 
 	if *deployContractsAndCreateJobs {
-
 		contractAddresses := model.ContractAddresses{
 			LinkAddress:             *linkAddress,
 			LinkEthAddress:          *linkEthAddress,
@@ -305,6 +314,9 @@ func main() {
 				coordinatorJobSpecConfig,
 				bhsJobSpecConfig,
 				*simulationBlock,
+				*coordinatorType,
+				uint8(*optimismL1GasFeeCalculationMode),
+				uint8(*optimismL1GasFeeCoefficient),
 			)
 		}
 
@@ -312,14 +324,14 @@ func main() {
 			node := node
 			client, app := connectToNode(&node.URL, output, node.CredsFile)
 
-			//GET ALL JOBS
+			// GET ALL JOBS
 			jobIDs := getAllJobIDs(client, app, output)
 
-			//DELETE ALL EXISTING JOBS
+			// DELETE ALL EXISTING JOBS
 			for _, jobID := range jobIDs {
 				deleteJob(jobID, client, app, output)
 			}
-			//CREATE JOBS
+			// CREATE JOBS
 
 			switch key {
 			case model.VRFPrimaryNodeName:

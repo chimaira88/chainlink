@@ -8,17 +8,17 @@ import (
 	"sync"
 
 	pkgerrors "github.com/pkg/errors"
-
 	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/mercury"
 	v3types "github.com/smartcontractkit/chainlink-common/pkg/types/mercury/v3"
 	v3 "github.com/smartcontractkit/chainlink-data-streams/mercury/v3"
 
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocrcommon"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
+	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline/eautils"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/types"
 	mercurytypes "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/types"
 	mercuryutils "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/utils"
@@ -26,8 +26,10 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
+const adapterLWBAErrorName = "AdapterLWBAError"
+
 type Runner interface {
-	ExecuteRun(ctx context.Context, spec pipeline.Spec, vars pipeline.Vars, l logger.Logger) (run *pipeline.Run, trrs pipeline.TaskRunResults, err error)
+	ExecuteRun(ctx context.Context, spec pipeline.Spec, vars pipeline.Vars) (run *pipeline.Run, trrs pipeline.TaskRunResults, err error)
 }
 
 type LatestReportFetcher interface {
@@ -74,7 +76,7 @@ func (ds *datasource) Observe(ctx context.Context, repts ocrtypes.ReportTimestam
 				return
 			}
 			if latest != nil {
-				maxFinalizedBlockNumber, decodeErr := ds.codec.ObservationTimestampFromReport(latest)
+				maxFinalizedBlockNumber, decodeErr := ds.codec.ObservationTimestampFromReport(ctx, latest)
 				obs.MaxFinalizedTimestamp.Val, obs.MaxFinalizedTimestamp.Err = int64(maxFinalizedBlockNumber), decodeErr
 				return
 			}
@@ -111,7 +113,9 @@ func (ds *datasource) Observe(ctx context.Context, repts ocrtypes.ReportTimestam
 	}()
 
 	var isLink, isNative bool
-	if ds.feedID == ds.linkFeedID {
+	if len(ds.jb.OCR2OracleSpec.PluginConfig) == 0 {
+		obs.LinkPrice.Val = v3.MissingPrice
+	} else if ds.feedID == ds.linkFeedID {
 		isLink = true
 	} else {
 		wg.Add(1)
@@ -129,7 +133,9 @@ func (ds *datasource) Observe(ctx context.Context, repts ocrtypes.ReportTimestam
 		}()
 	}
 
-	if ds.feedID == ds.nativeFeedID {
+	if len(ds.jb.OCR2OracleSpec.PluginConfig) == 0 {
+		obs.NativePrice.Val = v3.MissingPrice
+	} else if ds.feedID == ds.nativeFeedID {
 		isNative = true
 	} else {
 		wg.Add(1)
@@ -151,6 +157,19 @@ func (ds *datasource) Observe(ctx context.Context, repts ocrtypes.ReportTimestam
 	cancel()
 
 	if pipelineExecutionErr != nil {
+		var adapterError *eautils.AdapterError
+		if errors.As(pipelineExecutionErr, &adapterError) && adapterError.Name == adapterLWBAErrorName {
+			ocrcommon.MaybeEnqueueEnhancedTelem(ds.jb, ds.chEnhancedTelem, ocrcommon.EnhancedTelemetryMercuryData{
+				V3Observation:                &obs,
+				TaskRunResults:               trrs,
+				RepTimestamp:                 repts,
+				FeedVersion:                  mercuryutils.REPORT_V3,
+				FetchMaxFinalizedTimestamp:   fetchMaxFinalizedTimestamp,
+				IsLinkFeed:                   isLink,
+				IsNativeFeed:                 isNative,
+				DpInvariantViolationDetected: true,
+			})
+		}
 		return
 	}
 
@@ -267,7 +286,7 @@ func (ds *datasource) executeRun(ctx context.Context) (*pipeline.Run, pipeline.T
 		},
 	})
 
-	run, trrs, err := ds.pipelineRunner.ExecuteRun(ctx, ds.spec, vars, ds.lggr)
+	run, trrs, err := ds.pipelineRunner.ExecuteRun(ctx, ds.spec, vars)
 	if err != nil {
 		return nil, nil, pkgerrors.Wrapf(err, "error executing run for spec ID %v", ds.spec.ID)
 	}

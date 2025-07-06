@@ -8,16 +8,14 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
-	"github.com/smartcontractkit/chainlink/v2/common/txmgr/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	"github.com/smartcontractkit/chainlink-framework/chains/txmgr/types"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
 type transmitter interface {
 	CreateTransaction(ctx context.Context, txRequest txmgr.TxRequest) (tx txmgr.Tx, err error)
 }
-
-//go:generate mockery --quiet --name ORM --output ./mocks/ --case=underscore
 
 // ORM defines an interface for database commands related to Flux Monitor v2
 type ORM interface {
@@ -120,7 +118,6 @@ func (o *orm) CreateEthTransaction(
 	gasLimit uint64,
 	idempotencyKey *string,
 ) (err error) {
-
 	_, err = o.txm.CreateTransaction(ctx, txmgr.TxRequest{
 		IdempotencyKey: idempotencyKey,
 		FromAddress:    fromAddress,

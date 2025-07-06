@@ -2,6 +2,7 @@ package mercury_test
 
 import (
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
@@ -12,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/accounts/abi/bind/backends"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,9 +27,10 @@ import (
 	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
 	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
+
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest/heavyweight"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/keystest"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
@@ -42,6 +43,7 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocrbootstrap"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc/pb"
+	"github.com/smartcontractkit/chainlink/v2/core/utils/testutils/heavyweight"
 )
 
 var _ pb.MercuryServer = &mercuryServer{}
@@ -52,14 +54,14 @@ type request struct {
 }
 
 type mercuryServer struct {
-	privKey     ed25519.PrivateKey
+	csaSigner   crypto.Signer
 	reqsCh      chan request
 	t           *testing.T
 	buildReport func() []byte
 }
 
-func NewMercuryServer(t *testing.T, privKey ed25519.PrivateKey, reqsCh chan request, buildReport func() []byte) *mercuryServer {
-	return &mercuryServer{privKey, reqsCh, t, buildReport}
+func NewMercuryServer(t *testing.T, csaSigner crypto.Signer, reqsCh chan request, buildReport func() []byte) *mercuryServer {
+	return &mercuryServer{csaSigner, reqsCh, t, buildReport}
 }
 
 func (s *mercuryServer) Transmit(ctx context.Context, req *pb.TransmitRequest) (*pb.TransmitResponse, error) {
@@ -103,7 +105,7 @@ func startMercuryServer(t *testing.T, srv *mercuryServer, pubKeys []ed25519.Publ
 		t.Fatalf("[MAIN] failed to listen: %v", err)
 	}
 	serverURL = lis.Addr().String()
-	s := wsrpc.NewServer(wsrpc.WithCreds(srv.privKey, pubKeys))
+	s := wsrpc.NewServer(wsrpc.WithSigner(srv.csaSigner, pubKeys))
 
 	// Register mercury implementation with the wsrpc server
 	pb.RegisterMercuryServer(s, srv)
@@ -121,6 +123,7 @@ type Feed struct {
 	baseBenchmarkPrice *big.Int
 	baseBid            *big.Int
 	baseAsk            *big.Int
+	baseMarketStatus   uint32
 }
 
 func randomFeedID(version uint16) [32]byte {
@@ -154,7 +157,7 @@ func setupNode(
 	t *testing.T,
 	port int,
 	dbName string,
-	backend *backends.SimulatedBackend,
+	backend evmtypes.Backend,
 	csaKey csakey.KeyV2,
 ) (app chainlink.Application, peerID string, clientPubKey credentials.StaticSizedPublicKey, ocr2kb ocr2key.KeyBundle, observedLogs *observer.ObservedLogs) {
 	k := big.NewInt(int64(port)) // keys unique to port
@@ -465,5 +468,81 @@ chainID = 1337
 		feedName,
 		linkFeedID,
 		nativeFeedID,
+	))
+}
+
+func addV4MercuryJob(
+	t *testing.T,
+	node Node,
+	i int,
+	verifierAddress common.Address,
+	bootstrapPeerID string,
+	bootstrapNodePort int,
+	bmBridge,
+	marketStatusBridge string,
+	servers map[string]string,
+	clientPubKey ed25519.PublicKey,
+	feedName string,
+	feedID [32]byte,
+	linkFeedID [32]byte,
+	nativeFeedID [32]byte,
+) {
+	srvs := make([]string, 0, len(servers))
+	for u, k := range servers {
+		srvs = append(srvs, fmt.Sprintf("%q = %q", u, k))
+	}
+	serversStr := fmt.Sprintf("{ %s }", strings.Join(srvs, ", "))
+
+	node.AddJob(t, fmt.Sprintf(`
+type = "offchainreporting2"
+schemaVersion = 1
+name = "mercury-%[1]d-%[9]s"
+forwardingAllowed = false
+maxTaskDuration = "1s"
+contractID = "%[2]s"
+feedID = "0x%[8]x"
+contractConfigTrackerPollInterval = "1s"
+ocrKeyBundleID = "%[3]s"
+p2pv2Bootstrappers = [
+  "%[4]s"
+]
+relay = "evm"
+pluginType = "mercury"
+transmitterID = "%[7]x"
+observationSource = """
+	// Benchmark Price
+	price1          [type=bridge name="%[5]s" timeout="50ms" requestData="{\\"data\\":{\\"from\\":\\"ETH\\",\\"to\\":\\"USD\\"}}"];
+	price1_parse    [type=jsonparse path="result"];
+	price1_multiply [type=multiply times=100000000 index=0];
+
+	price1 -> price1_parse -> price1_multiply;
+
+	// Market Status
+	marketstatus       [type=bridge name="%[12]s" timeout="50ms" requestData="{\\"data\\":{\\"from\\":\\"ETH\\",\\"to\\":\\"USD\\"}}"];
+	marketstatus_parse [type=jsonparse path="result" index=1];
+
+	marketstatus -> marketstatus_parse;
+"""
+
+[pluginConfig]
+servers = %[6]s
+linkFeedID = "0x%[10]x"
+nativeFeedID = "0x%[11]x"
+
+[relayConfig]
+chainID = 1337
+		`,
+		i,
+		verifierAddress,
+		node.KeyBundle.ID(),
+		fmt.Sprintf("%s@127.0.0.1:%d", bootstrapPeerID, bootstrapNodePort),
+		bmBridge,
+		serversStr,
+		clientPubKey,
+		feedID,
+		feedName,
+		linkFeedID,
+		nativeFeedID,
+		marketStatusBridge,
 	))
 }

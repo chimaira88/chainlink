@@ -1,163 +1,387 @@
-# TOML is the Ultimate Choice!
+# Test Configurations
 
-## Introduction
+- [Test Configurations](#test-configurations)
+  - [Summary](#summary)
+  - [Configurations Files and Overrides Precedence](#configurations-files-and-overrides-precedence)
+    - [Test Secrets (optional)](#test-secrets-optional)
+    - [default.toml](#defaulttoml)
+    - [\<product\>.toml](#producttoml)
+    - [overrides.toml (optional)](#overridestoml-optional)
+    - [`BASE64_CONFIG_OVERRIDE`](#base64_config_override)
+  - [Node configurations](#node-configurations)
+    - [Spec Properties](#spec-properties)
+      - [BaseConfigTOML](#baseconfigtoml)
+    - [Network configurations](#network-configurations)
+      - [Spec Properties](#spec-properties-1)
+        - [CommonChainConfigTOML](#commonchainconfigtoml)
+        - [ChainConfigTOMLByChainID](#chainconfigtomlbychainid)
+    - [Programmatic configuration](#programmatic-configuration)
+    - [Embedded configurations](#embedded-configurations)
+  - [Test type and case specific configurations](#test-type-and-case-specific-configurations)
+  - [Product-specific configurations](#product-specific-configurations)
+    - [Migration tests](#migration-tests)
+    - [Automation](#automation)
+      - [Specific test secrets](#specific-test-secrets)
+    - [OCR](#ocr)
+      - [Common OCR configurations](#common-ocr-configurations)
+      - [Reuse OCR contracts](#reuse-ocr-contracts)
+  - [Worthy to note](#worthy-to-note)
+  - [Reusing `testconfig` in other projects](#reusing-testconfig-in-other-projects)
 
-Final implementation has undergone minor adjustments in comparison to the approach by Adam Hamric, Anindita Ghosh, and Sergey Kudasov stated in the ADR. The primary changes are as follows:
+> [!NOTE]
+> **Current state and v2**
+>
+> - There are still several configuration files required to run tests: `.env`, `default.toml, <per-product>.toml`, `testsecrets`.
+> - `TEST_LOG_LEVEL` is still kept as an environment variable to facilitate dynamic configuration selection by some tests.
+> - Configuration of Chainlink nodes with TOML files separated from test configuration is aimed at v2.
 
-* `TEST_LOG_LEVEL` remains an environment variable, pending the release of version 2.
-* `TEST_TYPE` is also kept as an environment variable to facilitate dynamic configuration selection by some tests.
-* TOML configuration of Chainlink nodes themselves has not been added, awaiting version 2.
-* The hierarchy of configuration overrides has been streamlined for simplicity.
+> [!IMPORTANT]
+> **Contributing**
+>
+> It's crucial to incorporate all new test configuration settings directly into the TOML configuration files, steering clear of using environment variables for this purpose. Our goal is to centralize all configuration details, including examples, within the same package. This approach simplifies the process of understanding the available configuration options and identifying the appropriate values to use for each setting.
 
-By design, all test configurations are intended to reside within the `testconfig` package, organized into application-specific folders. However, the system can locate these configurations in any folder within the `integration-tests` directory, selecting the first one found. To identify the configurations in use, execute tests with the `debug` log level.
+## Summary
 
-The `testconfig` package serves as a centralized resource for accessing configurations across all products, including shared settings like logging and network preferences, as well as initial funding for Chainlink nodes. Product configurations, if present, are subjected to validation based on logical assumptions and observed code values. The `TestConfig` structure includes a `Save()` method, allowing for the preservation of test configurations after all adjustments have been applied.
+The `testconfig` package represents a storage of test configurations per product/service.
 
-## Configuration and Overrides
+> [!TIP]
+> 1. The `testconfig.go` may `Save()` your specification to a configuration file.
+> 2. To identify the configurations in use, run tests with the `TEST_LOG_LEVEL=debug`.
 
-The order of precedence for overrides is as follows:
+## Configurations Files and Overrides Precedence
 
-* Environment variable `BASE64_CONFIG_OVERRIDE`
-* File `overrides.toml`
-* Product-specific file, e.g., `[product_name].toml`
-* The `default.toml` file
+Overrides work in the order of the following precedence (1 overrides 2 and so on):
 
-The `BASE64_CONFIG_OVERRIDE` environment variable is primarily intended for use in continuous integration environments, enabling the substitution of default settings with confidential or user-specific parameters. For instance:
+1. [Environment variable `BASE64_CONFIG_OVERRIDE`](#base64_config_override)
+2. [overrides.toml](#overridestoml-optional)
+3. [\<product\>.toml](#producttoml)
+4. [default.toml](#defaulttoml)
+5. [testsecrets](#test-secrets-optional)
+
+### Test Secrets (optional)
+
+Test secrets are necessary for remote environments (CI, Kubernetes). For more details, visit [Test Secrets in CTF](https://github.com/smartcontractkit/chainlink-testing-framework/blob/main/lib/config/README.md#test-secrets).
+
+### default.toml
+
+[default.toml](default.toml) represents common default test settings for logging, network, node and chain client.
+
+> [!TIP]
+> It is recommended to provide [product-specific configurations](#producttoml) with explicitly defined values to override default configs.
+
+### \<product\>.toml
+
+Product-specific default configurations stored in `./testconfig/<product_directory>/<product>.toml` (e.g. [ocr2.toml](./ocr2/ocr2.toml)). They explicitly define a [node configuration](#node-configurations), [test type-specific configurations](#test-type-and-case-specific-configurations), and override any [default settings](#defaulttoml) per product/service.
+
+### overrides.toml (optional)
+
+> [!CAUTION]
+> Even though `overrides.toml` is git-ignored, pay attention to avoid storing any sensitive data in this file, especially in override-files for remote environments (which are not git-ignored).
+
+The `overrides.toml` enables tests parametrization. When provided, it overrides default and per-product configurations.
+
+1. **For local runs**, store overrides as follows `./testconfig/overrides.toml`.
+2. **For remote environments** (CI, Kubernetes), commit overrides to repository under `../integration-tests/testconfig/<product>/overrides/<override-name>.toml` (e.g. [OCR2 overrides](../integration-tests/testconfig/ocr2/overrides/base_sepolia.toml)). See more in [E2E Tests on GitHub CI with overrides](../../.github/E2E_TESTS_ON_GITHUB_CI.md#test-workflows-setup-in-ci).
+
+Alternatively, set `E2E_TEST_CHAINLINK_IMAGE` and `E2E_TEST_CHAINLINK_VERSION` in `~/.testsecrets`
+
+### `BASE64_CONFIG_OVERRIDE`
+
+This environment variable is used for overriding defaults in remote testing ([CI - On Demand Workflows](../../.github/E2E_TESTS_ON_GITHUB_CI.md#on-demand-workflows) and Kubernetes) when triggered from local machine.
+
+Example:
 
 ```bash
-cat << EOF > config.toml
-[Network]
-selected_networks=["$SELECTED_NETWORKS"]
+# Go test
+BASE64_CONFIG_OVERRIDE=$(cat ./testconfig/overrides.toml | base64) go test <test args>
 
-[ChainlinkImage]
-image="$CHAINLINK_IMAGE"
-version="$CHAINLINK_VERSION"
-postgres_version="$CHAINLINK_POSTGRES_VERSION"
+- - - - - - - - - - - - -
 
-[Pyroscope]
-enabled=$pyroscope_enabled
-server_url="$PYROSCOPE_SERVER"
-environment="$PYROSCOPE_ENVIRONMENT"
-key_secret="$PYROSCOPE_KEY"
-
-[Logging]
-test_log_collect=false
-run_id="$RUN_ID"
-
-[Logging.LogStream]
-log_targets=["$LOG_TARGETS"]
-
-[Logging.Loki]
-tenant_id="$LOKI_TENANT_ID"
-endpoint="$LOKI_ENDPOINT"
-basic_auth_secret="$LOKI_BASIC_AUTH"
-
-[Logging.Grafana]
-base_url="$GRAFANA_URL"
-dashboard_url="$GRAFANA_DASHBOARD_URL"
-EOF
-
-BASE64_CONFIG_OVERRIDE=$(cat config.toml | base64 -w 0)
-echo ::add-mask::$BASE64_CONFIG_OVERRIDE
-echo "BASE64_CONFIG_OVERRIDE=$BASE64_CONFIG_OVERRIDE" >> $GITHUB_ENV
+# Make command
+BASE64_CONFIG_OVERRIDE=$(cat ./testconfig/overrides.toml | base64) make test_<test>
 ```
 
-**It is highly recommended to use reusable GHA actions present in [.actions](../../../.github/.actions) to generate and apply the base64-encoded configuration.** Own implementation of `BASE64_CONFIG_OVERRIDE` generation is discouraged and should be used only if existing actions do not cover the use case. But even in that case it might be a better idea to extend existing actions.
+## Node configurations
 
-This variable is automatically relayed to Kubernetes-based tests, eliminating the need for manual intervention in test scripts.
+A node configuration consists of two main blocks:
 
-The `overrides.toml` file is recommended for local use to adjust dynamic variables or modify predefined settings. At the very minimum it should contain the Chainlink image and version, as shown in the example below:
+- Network/chain configuration
+- Node-specific configuration
+
+### Spec Properties
+
+#### BaseConfigTOML
+
+A node's configuration unrelated to network settings is defined in `[NodeConfig].BaseConfigTOML="""your_config_here"""`, if none - defaults are used.
+
+Example:
 
 ```toml
-[ChainlinkImage]
-image = "your image name"
-version = "your tag"
+[NodeConfig]
+BaseConfigTOML = """
+[Feature]
+FeedsManager = true
+LogPoller = true
+UICSAKeys = true
+
+[OCR]
+Enabled = true
+"""
 ```
 
-Product-specific configurations, such as those in `[product_name].toml`, house the bulk of default and variant settings, supporting default configurations like the following in `log_poller.toml`:
+### Network configurations
+
+Chain-specific configuration is composed of the following blocks:
+
+- `[Network].selected_networks` - a list of networks to run tests on.
+- `ChainConfigTOMLByChainID` (if an entry with matching chain id is defined) OR `CommonChainConfigTOML` (if no entry with matching chain id is defined).
+
+> [!NOTE]
+>
+> 1. If a `ChainConfigTOMLByChainID` or `CommonChainConfigTOML` is specified, they will override any defaults a Chainlink Node might have for the given network.
+> 2. To override default [BaseConfigTOML](#baseconfigtoml) and/or [CommonChainConfigTOML](#commonchainconfigtoml) provide the entire blocks as if it would be completely new configuration.
+
+#### Spec Properties
+
+##### CommonChainConfigTOML
+
+A network-specific node config for EVM chains: `[NodeConfig].CommonChainConfigTOML="""your_config_here"""`.
+
+Example:
 
 ```toml
-# product defaults
-[LogPoller]
-[LogPoller.General]
-generator = "looped"
-contracts = 2
-events_per_tx = 4
-use_finality_tag = true
-log_poll_interval = "500ms"
-# 0 disables backup poller
-backup_log_poller_block_delay = 0
+CommonChainConfigTOML = """
+AutoCreateKey = true
+FinalityDepth = 1
+MinContractPayment = 0
 
-[LogPoller.Looped]
-execution_count = 100
-min_emit_wait_time_ms = 200
-max_emit_wait_time_ms = 500
+[GasEstimator]
+PriceMax = '200 gwei'
+LimitDefault = 6000000
+FeeCapDefault = '200 gwei'
+"""
 ```
 
-Named configurations allow for the customization of settings through unique identifiers, such as a test name or type, acting as specific overrides. Here's how you can define and use these configurations:
+##### ChainConfigTOMLByChainID
 
-For instance, to tailor configurations for a particular test, you might define it as follows:
+The `[NodeConfig.ChainConfigTOMLByChainID]` is a custom per-chain config that overrides the [`CommonChainConfigTOML`](#commonchainconfigtoml). See examples in product directories, e.g. [ocr2/example.toml](./ocr2/example.toml).
+
+Example:
 
 ```toml
-# Here the configuration name is "TestLogManyFiltersPollerFinalityTag"
-[TestLogManyFiltersPollerFinalityTag.LogPoller.General]
+[NodeConfig.ChainConfigTOMLByChainID]
+# applicable only to arbitrum-goerli chain
+421613 = """
+[GasEstimator]
+PriceMax = '400 gwei'
+LimitDefault = 100000000
+FeeCapDefault = '200 gwei'
+"""
+```
+
+> [!NOTE]
+> Currently, all networks are treated as EVM networks. There's no way to provide Solana, Starknet, Cosmos or Aptos configuration yet.
+
+### Programmatic configuration
+
+To set env vars for a Dockerized test use `docker.test_env_builder.WithCLNodeOptions(test_env.WithNodeEnvVars(envs))`.
+
+Example:
+
+```go
+envs := map[string]string{
+    "CL_LOOPP_HOSTNAME": "hostname",
+}
+
+nodeEnvVars := test_env.WithNodeEnvVars(envs)
+
+testEnv, err := test_env.NewCLTestEnvBuilder().
+    WithTestInstance(t).
+    WithTestConfig(&config).
+    WithPrivateEthereumNetwork(privateNetwork.EthereumNetworkConfig).
+    WithMockAdapter().
+    WithCLNodes(clNodeCount).
+    WithCLNodeOptions(nodeEnvVars).
+    WithFunding(big.NewFloat(.1)).
+    WithStandardCleanup().
+    WithSeth().
+    Build()
+```
+
+### Embedded configurations
+
+For the reason Go automatically excludes TOML files during the compilation of binaries, the [config_embed.go](./configs_embed.go) deliberately incorporates all the default configurations into the the compiled binary with a custom build tag `-o embed`. Hence, only `overrides.toml` may be potentially needed to execute tests.
+
+## Test type and case specific configurations
+
+These configurations represent unique identifiers used for customization of different test runs per product. When found, they take precedence and overrides the general (unnamed) settings (mentioned above).
+
+Examples:
+
+```toml
+# Specific per test configuration "TestLogPollerManyFiltersFinalityTag" for LogPoller
+[TestLogPollerManyFiltersFinalityTag.LogPoller.General]
 contracts = 300
-```
 
-Alternatively, for a configuration that applies to a certain type of test, as seen in `vrfv2.toml`, you could specify:
-
-```toml
-# Here the configuration name is "Soak"
+# "Soak" test configuration for VRFv2
 [Soak.VRFv2.Common]
 cancel_subs_after_test_run = true
+
+# "Load" test configuration for OCR2
+[Load.OCR2]
+[Load.OCR2.Common]
+eth_funds = 3
 ```
 
-When processing TOML files, the system initially searches for a general (unnamed) configuration. If a named configuration is found, it can specifically override the general (unnamed) settings, providing a targeted approach to configuration management based on distinct identifiers like test names or types.
+## Product-specific configurations
 
-Finally `default.toml` file is envisioned to contain fundamental and universally applicable settings, such as logging configurations.
+> [!TIP]
+> Find which configurations are applicable to a specific product in structs of the `testconfig/product directory/config.go (or <product>.go)`.
+> Examples: [ocr2/ocr2.go](./ocr2/ocr2.go), [automation/config.go](./automation/config.go).
 
-## Local/Kubernetes Usage
+### Migration tests
 
-GitHub workflows in this repository have been updated to dynamically generate and utilize base64-encoded TOML configurations derived from user inputs or environment variables. For local execution or remote Kubernetes runners, users must manually supply certain variables, which cannot be embedded in configuration files due to their sensitive or dynamic nature.
+1. Set `E2E_TEST_CHAINLINK_UPGRADE_IMAGE` in [testsecrets](#test-secrets-optional).
 
-Essential variables might include:
+   ```bash
+   E2E_TEST_CHAINLINK_UPGRADE_IMAGE="public.ecr.aws/chainlink/chainlink"
+   ```
 
-* Chainlink image and version
-* Test duration for specific tests (e.g., load, soak)
-* Configuration specific to Loki (mandatory for certain tests)
-* Grafana dashboard URLs
+2. In `overrides.toml` set image to upgrade to:
 
-For local testing, it is advisable to place these variables in the `overrides.toml` file. For Kubernetes or remote runners, the process involves creating a TOML file with the necessary values, encoding it in base64, and setting the result as the `BASE64_CONFIG_OVERRIDE` environment variable.
+    ```toml
+    # image to upgrade to
+    [ChainlinkUpgradeImage]
+    version="2.17.0-beta0"
+    ```
 
-## Embeded config
+3. Run tests:
 
-Because Go automatically excludes TOML files during the compilation of binaries, we must take deliberate steps to include our configuration files in the compiled binary. This can be accomplished by using a custom build tag `-o embed`. Implementing this tag will incorporate all the default configurations located in the `./testconfig` folder directly into the binary. Therefore, when executing tests from the binary, you'll only need to supply the `overrides.toml` file. This file should list only the settings you wish to modify; all other configurations will be sourced from the embedded configurations. You can access these embedded configurations [here](.integration-tests/testconfig/configs_embed.go).
+    ```bash
+    # Go
+    BASE64_CONFIG_OVERRIDE=$(cat ./testconfig/overrides.toml | base64) go test -v -p 1 ./smoke/<product>_test.go
 
-## To bear in mind
+    - - - - - - - - - - - - 
 
-### Validation failures
+    # Make command
+    BASE64_CONFIG_OVERRIDE=$(cat ./testconfig/overrides.toml | base64) make test_node_migrations_verbose
+    ```
 
-When the system encounters even a single setting related to a specific product or configuration within the configurations, it triggers a comprehensive validation of the entire configuration for that product. This approach is based on the assumption that if any configuration for a given product is specified, the entire set of configurations for that product must be complete and valid. This is particularly crucial when dealing with the `overrides.toml` file, where it's easy to overlook the need to comment out or adjust values when switching between configurations for different products. Essentially, the presence of any specific configuration detail necessitates that all relevant configurations for that product be fully defined and correct to prevent validation errors.
+### Automation
 
-## Possible nil pointers
+#### Specific test secrets
 
-If no configuration values are set for a product or its logging parameters, the system won't perform validation checks. This can lead to a 'nil pointer exception' error if you attempt to access a configuration property later on. This situation arises because we use pointers to facilitate optional overrides; accessing an unset (nil) pointer will cause an error. To avoid such issues, especially when general validations might not cover every scenario, it's crucial for users to ensure that all necessary configuration options are explicitly set. Additionally, it's highly recommended to implement test-specific validations to confirm that all required values for a particular test are indeed established. This proactive approach helps prevent runtime errors and ensures smooth test execution.
+| Secret                        | Env Var                                                             | Example                                      | Description                                                                          |
+| ----------------------------- | ------------------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Data Streams Url              | `E2E_TEST_DATA_STREAMS_URL`                                         | `E2E_TEST_DATA_STREAMS_URL=url`              | Required by some automation tests to connect to data streams.                         |
+| Data Streams Username         | `E2E_TEST_DATA_STREAMS_USERNAME`                                    | `E2E_TEST_DATA_STREAMS_USERNAME=username`    | Required by some automation tests to connect to data streams.    |
+| Data Streams Password         | `E2E_TEST_DATA_STREAMS_PASSWORD`                                    | `E2E_TEST_DATA_STREAMS_PASSWORD=password`    | Required by some automation tests to connect to data streams. |
 
-## Contributing
+### OCR
 
-It's crucial to incorporate all new test configuration settings directly into the TOML configuration files, steering clear of using environment variables for this purpose. Our goal is to centralize all configuration details, including examples, within the same package. This approach simplifies the process of understanding the available configuration options and identifying the appropriate values to use for each setting.
+#### Common OCR configurations
 
-## Reusing TestConfig in other projects
+Specify number of contracts to be deployed for OCR (correspondingly, the same amount of jobs per OCR contract will be created on a node). For example:
 
-To ensure the cleanliness and simplicity of your project's configuration, it's advised against using the `testconfig` code as a direct library in other projects. The reason is that much of this code is tailored specifically to its current application, which might not align with the requirements of your project. Your project might not necessitate any overrides or could perhaps benefit from a simpler configuration approach.
+```toml
+# OCRv1
+[OCR.Common]
+number_of_contracts=2
 
-However, if you find a need to utilize some methods from this project, the recommended practice is to implement the required interfaces within your project's configuration package, rather than directly copying and pasting code. For instance, if you aim to incorporate a setup action similar to the `SetupVRFV2Environment` for VRFv2, like the one shown below:
+- - - - - - - - - - - -
+
+# OCRv2
+[OCR2.Common]
+number_of_contracts=2
+```
+
+#### Reuse OCR contracts
+
+The feature supports OCR v1 and v2. It gets enabled when `[OCR.Contract]` block is specified.
+
+To reuse existing OCR contracts provide:
+
+- LINK token address (unique per chain)
+- OCR contract addresses
+- [optional] choose, whether to use and configure the existing OCR contracts. **N/B:** usage/configuring of several selected contracts (not all the listed addresses) is not supported. All the contacts should have the same `use` and `configure` values.
+
+Example:
+
+```toml
+# For OCRv1
+[OCR.Contracts]
+link_token = "0x88d1239894D9582f5849E5b5a964da9e5730f1E6"
+offchain_aggregators = ["0xc1ce3815d6e7f3705265c2577F1342344752A5Eb"]
+
+# If [OCR.Contracts.Settings.<OCR aggregator address>] is not present, we assume it should be used and configured
+
+- - - - - - - - - - - - 
+
+# For OCRv2
+[OCR2.Contracts]
+link_token = "0x88d1239894D9582f5849E5b5a964da9e5730f1E6"
+offchain_aggregators = ["0xc1ce3815d6e7f3705265c2577F1342344752A5Eb"]
+
+# notice that this address needs to match the one in offchain_aggregators
+[OCR2.Contracts.Settings."0xc1ce3815d6e7f3705265c2577F1342344752A5Eb"]
+use = false # Default: true. Reuse existing OCR contracts?
+configure = false # Default: true. Configure existing OCR contracts?
+
+- - - - - - - - - - - - 
+
+# Non-compliant configurations
+[OCR.Contracts]
+link_token = "0x88d1239894D9582f5849E5b5a964da9e5730f1E6"
+offchain_aggregators = ["0xc1ce3815d6e7f3705265c2577F1342344752A5Eb", "0x2f4FA21fCd917C448C160caafEC874032F404c08"]
+
+# Example 1: Setting `configure` to `false` for selected (not all) addresses will fail configuration validation
+[OCR.Contracts.Settings."0xc1ce3815d6e7f3705265c2577F1342344752A5Eb"]
+configure = false
+
+# OR
+
+# Example 2: Setting `configure` to different values for the listed contracts will fail execution
+[OCR.Contracts.Settings."0xc1ce3815d6e7f3705265c2577F1342344752A5Eb"]
+configure = false
+
+[OCR.Contracts.Settings."0x2f4FA21fCd917C448C160caafEC874032F404c08"]
+configure = true
+
+# OR
+
+# Example 3: Setting `use` to different values for the listed contracts will fail execution
+[OCR.Contracts.Settings."0xc1ce3815d6e7f3705265c2577F1342344752A5Eb"]
+use = false
+
+[OCR.Contracts.Settings."0x2f4FA21fCd917C448C160caafEC874032F404c08"]
+use = true
+```
+
+## Worthy to note
+
+> [!NOTE]
+> **Configuration Validation and `nil` pointers**
+> When tests encounter a [test](#test-type-and-case-specific-configurations) or [product-specific](#product-specific-configurations) setting, they trigger a validation to ensure that the entire set of configurations for that product is complete and valid.
+>
+> If there are no configuration values (for a product or its logging parameters), the tests won't perform validation checks, leading to a `nil pointer exception` error on an attempt to access a configuration property later on. The error is caused by the usage of pointers to facilitate optional overrides: accessing an unset (nil) pointer will cause an error. To avoid such run-time issues, it is highly recommended to implement configuration-specific validations to confirm that all the required values for a particular test are explicitly specified.
+
+> [!NOTE]
+> **Known Issues/Limitations**
+> Duplicated test configuration file names in different locations may lead to an unpredictable execution behavior.
+>
+> The use of pointer fields for optional configuration elements necessitates careful handling, especially for programmatic modifications, to avoid unintended consequences. The `MustCopy()` function is recommended for creating deep copies of configurations for isolated modifications. Unfortunately some of the custom types are not copied at all, you need to set them manually. It's true for example for `blockchain.StrDuration` type.
+
+## Reusing `testconfig` in other projects
+
+To utilize some methods from this project, implement the required interfaces within your project's configuration package (no copy-pasting or structure replicating).
+
+Example:
 
 ```go
 func SetupVRFV2Environment(
     env *test_env.CLClusterTestEnv,
     nodesToCreate []vrfcommon.VRFNodeType,
-    vrfv2TestConfig types.VRFv2TestConfig,
+    vrfv2TestConfig types.VRFv2TestConfig, // implementation of interface used as a parameter
     useVRFOwner bool,
     useTestCoordinator bool,
     linkToken contracts.LinkToken,
@@ -167,12 +391,5 @@ func SetupVRFV2Environment(
     numberOfConsumers int,
     numberOfSubToCreate int,
     l zerolog.Logger,
-) (*vrfcommon.VRFContracts, []uint64, *vrfcommon.VRFKeyData, map[vrfcommon.VRFNodeType]*vrfcommon.VRFNode, error) {
+) (*vrfcommon.VRFContracts, []uint64, *vrfcommon.VRFKeyData, map[vrfcommon.VRFNodeType]*vrfcommon.VRFNode, error) { <setup logic> }
 ```
-
-You should not replicate the entire `TestConfig` structure. Instead, create an implementation of the `types.VRFv2TestConfig` interface in your project and use that as the parameter. This approach allows you to maintain a streamlined and focused configuration package in your project.
-
-## Known Issues/Limitations
-
-* Duplicate file names in different locations may lead to unpredictable configurations being selected.
-* The use of pointer fields for optional configuration elements necessitates careful handling, especially for programmatic modifications, to avoid unintended consequences. The `MustCopy()` function is recommended for creating deep copies of configurations for isolated modifications. Unfortunately some of the custom types are not copied at all, you need to set them manually. It's true for example for `blockchain.StrDuration` type.

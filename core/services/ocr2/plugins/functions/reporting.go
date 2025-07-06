@@ -91,7 +91,7 @@ func formatRequestId(requestId []byte) string {
 }
 
 // NewReportingPlugin complies with ReportingPluginFactory
-func (f FunctionsReportingPluginFactory) NewReportingPlugin(rpConfig types.ReportingPluginConfig) (types.ReportingPlugin, types.ReportingPluginInfo, error) {
+func (f FunctionsReportingPluginFactory) NewReportingPlugin(ctx context.Context, rpConfig types.ReportingPluginConfig) (types.ReportingPlugin, types.ReportingPluginInfo, error) {
 	pluginConfig, err := config.DecodeReportingPluginConfig(rpConfig.OffchainConfig)
 	if err != nil {
 		f.Logger.Error("unable to decode reporting plugin config", commontypes.LogFields{
@@ -337,7 +337,7 @@ func (r *functionsReporting) Report(ctx context.Context, ts types.ReportTimestam
 		}
 
 		// TODO: support per-request aggregation method
-		// https://app.shortcut.com/chainlinklabs/story/57701/per-request-plugin-config
+		// https://smartcontract-it.atlassian.net/browse/FUN-159
 		aggregated, errAgg := Aggregate(defaultAggMethod, observations)
 		if errAgg != nil {
 			r.logger.Error("FunctionsReporting Report: error when aggregating reqId", commontypes.LogFields{

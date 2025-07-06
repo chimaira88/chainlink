@@ -8,7 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pkg/errors"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
+	"github.com/smartcontractkit/chainlink-evm/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
@@ -33,8 +33,6 @@ type Event struct {
 }
 
 // BHS defines an interface for interacting with a BlockhashStore contract.
-//
-//go:generate mockery --quiet --name BHS --output ./mocks/ --case=underscore
 type BHS interface {
 	// Store the hash associated with blockNum.
 	Store(ctx context.Context, blockNum uint64) error

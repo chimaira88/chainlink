@@ -28,15 +28,10 @@ ALTER TABLE log_broadcasts RENAME COLUMN job_id_v2 TO job_id;
 ALTER TABLE job_spec_errors_v2 RENAME TO job_spec_errors;
 `
 
-func init() {
-	goose.AddMigrationContext(Up54, Down54)
-}
-
 type queryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
 }
 
-// nolint
 func Up54(ctx context.Context, tx *sql.Tx) error {
 	if err := CheckNoLegacyJobs(ctx, tx); err != nil {
 		return err
@@ -47,7 +42,6 @@ func Up54(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// nolint
 func Down54(ctx context.Context, tx *sql.Tx) error {
 	return errors.New("irreversible migration")
 }
@@ -63,3 +57,5 @@ func CheckNoLegacyJobs(ctx context.Context, ds queryer) error {
 	}
 	return nil
 }
+
+var Migration54 = goose.NewGoMigration(54, &goose.GoFunc{RunTx: Up54}, &goose.GoFunc{RunTx: Down54})

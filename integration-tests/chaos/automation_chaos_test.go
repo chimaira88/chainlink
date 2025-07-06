@@ -6,27 +6,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smartcontractkit/chainlink/integration-tests/actions/automationv2"
+
+	seth_utils "github.com/smartcontractkit/chainlink-testing-framework/lib/utils/seth"
+
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
-	ctf_config "github.com/smartcontractkit/chainlink-testing-framework/config"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/chaos"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/environment"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/cdk8s/blockscout"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/chainlink"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/ethereum"
-	"github.com/smartcontractkit/chainlink-testing-framework/logging"
-	"github.com/smartcontractkit/chainlink-testing-framework/networks"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils/ptr"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils/testcontext"
+	ctf_config "github.com/smartcontractkit/chainlink-testing-framework/lib/config"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/chaos"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/environment"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/pkg/helm/chainlink"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/pkg/helm/ethereum"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/logging"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/networks"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/utils/ptr"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/utils/testcontext"
 
+	"github.com/smartcontractkit/chainlink/deployment/environment/nodeclient"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
-	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
 	eth_contracts "github.com/smartcontractkit/chainlink/integration-tests/contracts/ethereum"
-
 	tc "github.com/smartcontractkit/chainlink/integration-tests/testconfig"
 )
 
@@ -78,22 +79,6 @@ ListenAddresses = ["0.0.0.0:6690"]`
 			},
 		},
 	}
-
-	defaultOCRRegistryConfig = contracts.KeeperRegistrySettings{
-		PaymentPremiumPPB:    uint32(200000000),
-		FlatFeeMicroLINK:     uint32(0),
-		BlockCountPerTurn:    big.NewInt(10),
-		CheckGasLimit:        uint32(2500000),
-		StalenessSeconds:     big.NewInt(90000),
-		GasCeilingMultiplier: uint16(1),
-		MinUpkeepSpend:       big.NewInt(0),
-		MaxPerformGas:        uint32(5000000),
-		FallbackGasPrice:     big.NewInt(2e11),
-		FallbackLinkPrice:    big.NewInt(2e18),
-		MaxCheckDataSize:     uint32(5000),
-		MaxPerformDataSize:   uint32(5000),
-		MaxRevertDataSize:    uint32(5000),
-	}
 )
 
 func getDefaultAutomationSettings(config *tc.TestConfig) map[string]interface{} {
@@ -128,6 +113,7 @@ func TestAutomationChaos(t *testing.T) {
 		"registry_2_0": eth_contracts.RegistryVersion_2_0,
 		"registry_2_1": eth_contracts.RegistryVersion_2_1,
 		"registry_2_2": eth_contracts.RegistryVersion_2_2,
+		"registry_2_3": eth_contracts.RegistryVersion_2_3,
 	}
 
 	for name, registryVersion := range registryVersions {
@@ -135,7 +121,7 @@ func TestAutomationChaos(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			config, err := tc.GetConfig("Chaos", tc.Automation)
+			config, err := tc.GetConfig([]string{"Chaos"}, tc.Automation)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,19 +197,31 @@ func TestAutomationChaos(t *testing.T) {
 					t.Parallel()
 					network := networks.MustGetSelectedNetworkConfig(config.Network)[0] // Need a new copy of the network for each test
 
+					nsLabels, err := environment.GetRequiredChainLinkNamespaceLabels(string(tc.Automation), "chaos")
+					require.NoError(t, err, "Error creating required chain.link labels for namespace")
+
+					workloadPodLabels, err := environment.GetRequiredChainLinkWorkloadAndPodLabels(string(tc.Automation), "chaos")
+					require.NoError(t, err, "Error creating required chain.link labels for workloads and pods")
+
 					testEnvironment := environment.
 						New(&environment.Config{
 							NamespacePrefix: fmt.Sprintf("chaos-automation-%s", name),
 							TTL:             time.Hour * 1,
 							Test:            t,
+							Labels:          nsLabels,
+							WorkloadLabels:  workloadPodLabels,
+							PodLabels:       workloadPodLabels,
 						}).
 						AddHelm(testCase.networkChart).
-						AddHelm(testCase.clChart).
-						AddChart(blockscout.New(&blockscout.Props{
-							Name:    "geth-blockscout",
-							WsURL:   network.URL,
-							HttpURL: network.HTTPURLs[0],
-						}))
+						AddHelm(testCase.clChart)
+					// TODO we need to update the image in CTF, the old one is not available anymore
+					// deploy blockscout if running on simulated
+					// AddHelm(testCase.clChart).
+					// AddChart(blockscout.New(&blockscout.Props{
+					// 	Name:    "geth-blockscout",
+					// 	WsURL:   network.URL,
+					// 	HttpURL: network.HTTPURLs[0],
+					// })
 					err = testEnvironment.Run()
 					require.NoError(t, err, "Error setting up test environment")
 					if testEnvironment.WillUseRemoteRunner() {
@@ -237,68 +235,52 @@ func TestAutomationChaos(t *testing.T) {
 					err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, "instance=node-", 2, 5, ChaosGroupMajorityPlus)
 					require.NoError(t, err)
 
-					chainClient, err := blockchain.NewEVMClient(network, testEnvironment, l)
-					require.NoError(t, err, "Error connecting to blockchain")
-					contractDeployer, err := contracts.NewContractDeployer(chainClient, l)
-					require.NoError(t, err, "Error building contract deployer")
-
-					chainlinkNodes, err := client.ConnectChainlinkNodes(testEnvironment)
+					chainlinkNodes, err := nodeclient.ConnectChainlinkNodes(testEnvironment)
 					require.NoError(t, err, "Error connecting to Chainlink nodes")
-					chainClient.ParallelTransactions(true)
+
+					network = seth_utils.MustReplaceSimulatedNetworkUrlWithK8(l, network, *testEnvironment)
+
+					chainClient, err := seth_utils.GetChainClientWithConfigFunction(&config, network, seth_utils.OneEphemeralKeysLiveTestnetAutoFixFn)
+					require.NoError(t, err, "Error creating seth client")
 
 					// Register cleanup for any test
 					t.Cleanup(func() {
-						if chainClient != nil {
-							chainClient.GasStats().PrintStats()
-						}
-						err := actions.TeardownSuite(t, testEnvironment, chainlinkNodes, nil, zapcore.PanicLevel, &config, chainClient)
+						err := actions.TeardownSuite(t, chainClient, testEnvironment, chainlinkNodes, nil, zapcore.PanicLevel, &config)
 						require.NoError(t, err, "Error tearing down environment")
 					})
 
-					txCost, err := chainClient.EstimateCostForChainlinkOperations(1000)
-					require.NoError(t, err, "Error estimating cost for Chainlink Operations")
-					err = actions.FundChainlinkNodes(chainlinkNodes, chainClient, txCost)
+					a := automationv2.NewAutomationTestK8s(l, chainClient, chainlinkNodes, &config)
+					a.SetMercuryCredentialName("cred1")
+					a.RegistrySettings = actions.ReadRegistryConfig(config)
+					a.RegistrySettings.RegistryVersion = rv
+					a.PluginConfig = actions.ReadPluginConfig(config)
+					a.PublicConfig = actions.ReadPublicConfig(config)
+					a.RegistrarSettings = contracts.KeeperRegistrarSettings{
+						AutoApproveConfigType: uint8(2),
+						AutoApproveMaxAllowed: 1000,
+						MinLinkJuels:          big.NewInt(0),
+					}
+
+					a.SetupAutomationDeployment(t)
+
+					err = actions.FundChainlinkNodesFromRootAddress(l, a.ChainClient, contracts.ChainlinkK8sClientToChainlinkNodeWithKeysAndAddress(chainlinkNodes[1:]), big.NewFloat(*config.Common.ChainlinkNodeFunding))
 					require.NoError(t, err, "Error funding Chainlink nodes")
 
-					linkToken, err := contractDeployer.DeployLinkTokenContract()
-					require.NoError(t, err, "Error deploying LINK token")
+					var consumersLogTrigger, consumersConditional []contracts.KeeperConsumer
+					var upkeepidsConditional, upkeepidsLogTrigger []*big.Int
+					consumersConditional, upkeepidsConditional = actions.DeployConsumers(t, a.ChainClient, a.Registry, a.Registrar, a.LinkToken, numberOfUpkeeps, big.NewInt(defaultLinkFunds), defaultUpkeepGasLimit, false, false, false, nil, &config)
+					consumers := consumersConditional
+					upkeepIDs := upkeepidsConditional
+					if rv >= eth_contracts.RegistryVersion_2_1 {
+						consumersLogTrigger, upkeepidsLogTrigger = actions.DeployConsumers(t, a.ChainClient, a.Registry, a.Registrar, a.LinkToken, numberOfUpkeeps, big.NewInt(defaultLinkFunds), defaultUpkeepGasLimit, true, false, false, nil, &config)
 
-					registry, registrar := actions.DeployAutoOCRRegistryAndRegistrar(
-						t,
-						rv,
-						defaultOCRRegistryConfig,
-						linkToken,
-						contractDeployer,
-						chainClient,
-					)
+						consumers = append(consumersConditional, consumersLogTrigger...)
+						upkeepIDs = append(upkeepidsConditional, upkeepidsLogTrigger...)
 
-					// Fund the registry with LINK
-					err = linkToken.Transfer(registry.Address(), big.NewInt(0).Mul(big.NewInt(1e18), big.NewInt(int64(numberOfUpkeeps))))
-					require.NoError(t, err, "Funding keeper registry contract shouldn't fail")
-
-					actions.CreateOCRKeeperJobs(t, chainlinkNodes, registry.Address(), network.ChainID, 0, rv)
-					nodesWithoutBootstrap := chainlinkNodes[1:]
-					defaultOCRRegistryConfig.RegistryVersion = rv
-					ocrConfig, err := actions.BuildAutoOCR2ConfigVars(t, nodesWithoutBootstrap, defaultOCRRegistryConfig, registrar.Address(), 30*time.Second, registry.ChainModuleAddress(), registry.ReorgProtectionEnabled())
-					require.NoError(t, err, "Error building OCR config vars")
-
-					if rv == eth_contracts.RegistryVersion_2_0 {
-						err = registry.SetConfig(defaultOCRRegistryConfig, ocrConfig)
-					} else {
-						err = registry.SetConfigTypeSafe(ocrConfig)
-					}
-					require.NoError(t, err, "Registry config should be be set successfully")
-					require.NoError(t, chainClient.WaitForEvents(), "Waiting for config to be set")
-
-					consumersConditional, upkeepidsConditional := actions.DeployConsumers(t, registry, registrar, linkToken, contractDeployer, chainClient, numberOfUpkeeps, big.NewInt(defaultLinkFunds), defaultUpkeepGasLimit, false, false)
-					consumersLogtrigger, upkeepidsLogtrigger := actions.DeployConsumers(t, registry, registrar, linkToken, contractDeployer, chainClient, numberOfUpkeeps, big.NewInt(defaultLinkFunds), defaultUpkeepGasLimit, true, false)
-
-					consumers := append(consumersConditional, consumersLogtrigger...)
-					upkeepIDs := append(upkeepidsConditional, upkeepidsLogtrigger...)
-
-					for _, c := range consumersLogtrigger {
-						err = c.Start()
-						require.NoError(t, err, "Error starting consumer")
+						for _, c := range consumersLogTrigger {
+							err = c.Start()
+							require.NoError(t, err, "Error starting consumer")
+						}
 					}
 
 					l.Info().Msg("Waiting for all upkeeps to be performed")
@@ -319,6 +301,13 @@ func TestAutomationChaos(t *testing.T) {
 					_, err = testEnvironment.Chaos.Run(testCase.chaosFunc(testEnvironment.Cfg.Namespace, testCase.chaosProps))
 					require.NoError(t, err)
 
+					if rv >= eth_contracts.RegistryVersion_2_1 {
+						for _, c := range consumersLogTrigger {
+							err = c.Start()
+							require.NoError(t, err, "Error starting consumer")
+						}
+					}
+
 					gom.Eventually(func(g gomega.Gomega) {
 						// Check if the upkeeps are performing multiple times by analyzing their counters and checking they are greater than 10
 						for i := 0; i < len(upkeepIDs); i++ {
@@ -329,7 +318,7 @@ func TestAutomationChaos(t *testing.T) {
 							g.Expect(counter.Int64()).Should(gomega.BeNumerically(">=", int64(expect)),
 								"Expected consumer counter to be greater than %d, but got %d", expect, counter.Int64())
 						}
-					}, "3m", "1s").Should(gomega.Succeed()) // ~1m for cluster setup, ~2m for performing each upkeep 5 times, ~2m buffer
+					}, "5m", "1s").Should(gomega.Succeed()) // ~1m for cluster setup, ~2m for performing each upkeep 5 times, ~2m buffer
 				})
 			}
 

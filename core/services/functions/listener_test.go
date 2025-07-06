@@ -22,8 +22,10 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox/mailboxtest"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
 
-	log_mocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/log/mocks"
+	"github.com/smartcontractkit/chainlink-evm/pkg/client/clienttest"
+	log_mocks "github.com/smartcontractkit/chainlink/v2/common/log/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest"
@@ -37,7 +39,6 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/functions/config"
 	threshold_mocks "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/threshold/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
-	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/types"
 	evmrelay_mocks "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/types/mocks"
 	s4_mocks "github.com/smartcontractkit/chainlink/v2/core/services/s4/mocks"
@@ -79,17 +80,28 @@ func NewFunctionsListenerUniverse(t *testing.T, timeoutSec int, pruneFrequencySe
 	cfg := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 		c.EVM[0].MinIncomingConfirmations = ptr[uint32](1)
 	})
-	ethClient := evmtest.NewEthClientMockWithDefaultChain(t)
+	ethClient := clienttest.NewClientWithDefaultChainID(t)
 	broadcaster := log_mocks.NewBroadcaster(t)
 	broadcaster.On("AddDependents", 1)
 	mailMon := servicetest.Run(t, mailboxtest.NewMonitor(t))
 
 	db := pgtest.NewSqlxDB(t)
 	kst := cltest.NewKeyStore(t, db)
-	relayExtenders := evmtest.NewChainRelayExtenders(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg, Client: ethClient, KeyStore: kst.Eth(), LogBroadcaster: broadcaster, MailMon: mailMon})
-	legacyChains := evmrelay.NewLegacyChainsFromRelayerExtenders(relayExtenders)
+	legacyChains := evmtest.NewLegacyChains(t, evmtest.TestChainOpts{
+		ChainConfigs:   cfg.EVMConfigs(),
+		DatabaseConfig: cfg.Database(),
+		FeatureConfig:  cfg.Feature(),
+		ListenerConfig: cfg.Database().Listener(),
+		DB:             db,
+		Client:         ethClient,
+		KeyStore:       kst.Eth(),
+		LogBroadcaster: broadcaster,
+		MailMon:        mailMon,
+	})
 
-	chain := legacyChains.Slice()[0]
+	chainService := legacyChains.Slice()[0]
+	chain, ok := chainService.(legacyevm.Chain)
+	require.True(t, ok)
 	lggr := logger.TestLogger(t)
 
 	pluginORM := functions_mocks.NewORM(t)

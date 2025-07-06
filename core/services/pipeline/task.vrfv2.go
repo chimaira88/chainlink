@@ -12,9 +12,10 @@ import (
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
 
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_coordinator_v2"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrf_coordinator_v2"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/services/signatures/secp256k1"
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf/proof"
 )
@@ -96,7 +97,7 @@ func (t *VRFTaskV2) Run(_ context.Context, lggr logger.Logger, vars Vars, inputs
 	}
 	pk, err := secp256k1.NewPublicKeyFromBytes(pubKey)
 	if err != nil {
-		return Result{Error: fmt.Errorf("failed to create PublicKey from bytes %v", err)}, runInfo
+		return Result{Error: fmt.Errorf("failed to create PublicKey from bytes %w", err)}, runInfo
 	}
 	pkh := pk.MustHash()
 	// Validate the key against the spec

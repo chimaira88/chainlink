@@ -11,6 +11,8 @@ import (
 	"github.com/pkg/errors"
 	"gopkg.in/guregu/null.v4"
 
+	proto "github.com/smartcontractkit/chainlink-protos/orchestrator/feedsmanager"
+
 	"github.com/smartcontractkit/chainlink/v2/core/utils/crypto"
 )
 
@@ -76,17 +78,41 @@ func (p *Plugins) Scan(value interface{}) error {
 type ChainType string
 
 const (
-	ChainTypeUnknown ChainType = "UNKNOWN"
-	ChainTypeEVM     ChainType = "EVM"
+	ChainTypeUnknown  ChainType = "UNKNOWN"
+	ChainTypeAptos    ChainType = "APTOS"
+	ChainTypeEVM      ChainType = "EVM"
+	ChainTypeSolana   ChainType = "SOLANA"
+	ChainTypeStarknet ChainType = "STARKNET"
+	ChainTypeTron     ChainType = "TRON"
+	ChainTypeTON      ChainType = "TON"
 )
 
 func NewChainType(s string) (ChainType, error) {
 	switch s {
 	case "EVM":
 		return ChainTypeEVM, nil
+	case "STARKNET":
+		return ChainTypeStarknet, nil
+	case "SOLANA":
+		return ChainTypeSolana, nil
+	case "APTOS":
+		return ChainTypeAptos, nil
+	case "TRON":
+		return ChainTypeTron, nil
+	case "TON":
+		return ChainTypeTON, nil
 	default:
 		return ChainTypeUnknown, errors.New("invalid chain type")
 	}
+}
+
+// ChainTypeToProtoChainType converts a ChainType to a proto.ChainType.
+func ChainTypeToProtoChainType(chainType ChainType) proto.ChainType {
+	prefixed := "CHAIN_TYPE_" + string(chainType)
+	if chainType, exists := proto.ChainType_value[prefixed]; exists {
+		return proto.ChainType(chainType)
+	}
+	return proto.ChainType_CHAIN_TYPE_UNSPECIFIED
 }
 
 // FeedsManager defines a registered Feeds Manager Service and the connection
@@ -99,21 +125,23 @@ type FeedsManager struct {
 	IsConnectionActive bool
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
+	DisabledAt         *time.Time
 }
 
 // ChainConfig defines the chain configuration for a Feeds Manager.
 type ChainConfig struct {
-	ID                int64
-	FeedsManagerID    int64
-	ChainID           string
-	ChainType         ChainType
-	AccountAddress    string
-	AdminAddress      string
-	FluxMonitorConfig FluxMonitorConfig
-	OCR1Config        OCR1Config
-	OCR2Config        OCR2ConfigModel
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                      int64
+	FeedsManagerID          int64
+	ChainID                 string
+	ChainType               ChainType
+	AccountAddress          string
+	AccountAddressPublicKey null.String
+	AdminAddress            string
+	FluxMonitorConfig       FluxMonitorConfig
+	OCR1Config              OCR1Config
+	OCR2Config              OCR2ConfigModel
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 // FluxMonitorConfig defines configuration for FluxMonitorJobs.

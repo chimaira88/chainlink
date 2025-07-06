@@ -1,6 +1,8 @@
 package resolver
 
 import (
+	"strconv"
+
 	"github.com/graph-gophers/graphql-go"
 
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
@@ -125,12 +127,52 @@ func (r *SpecResolver) ToWorkflowSpec() (*WorkflowSpecResolver, bool) {
 	return &WorkflowSpecResolver{spec: *r.j.WorkflowSpec}, true
 }
 
+func (r *SpecResolver) ToStandardCapabilitiesSpec() (*StandardCapabilitiesSpecResolver, bool) {
+	if r.j.Type != job.StandardCapabilities {
+		return nil, false
+	}
+
+	return &StandardCapabilitiesSpecResolver{spec: *r.j.StandardCapabilitiesSpec}, true
+}
+
+func (r *SpecResolver) ToStreamSpec() (*StreamSpecResolver, bool) {
+	if r.j.Type != job.Stream {
+		return nil, false
+	}
+	res := &StreamSpecResolver{}
+	if r.j.StreamID != nil {
+		sid := strconv.FormatUint(uint64(*r.j.StreamID), 10)
+		res.streamID = &sid
+	}
+
+	return res, true
+}
+
+func (r *SpecResolver) ToCCIPSpec() (*CCIPSpecResolver, bool) {
+	if r.j.Type != job.CCIP {
+		return nil, false
+	}
+
+	return &CCIPSpecResolver{spec: *r.j.CCIPSpec}, true
+}
+
 type CronSpecResolver struct {
 	spec job.CronSpec
 }
 
 func (r *CronSpecResolver) Schedule() string {
 	return r.spec.CronSchedule
+}
+
+// EVMChainID resolves the spec's evm chain id.
+func (r *CronSpecResolver) EVMChainID() *string {
+	if r.spec.EVMChainID == nil {
+		return nil
+	}
+
+	chainID := r.spec.EVMChainID.String()
+
+	return &chainID
 }
 
 // CreatedAt resolves the spec's created at timestamp.
@@ -566,6 +608,10 @@ func (r *OCR2SpecResolver) FeedID() *string {
 	return &feedID
 }
 
+func (r *OCR2SpecResolver) AllowNoBootstrappers() bool {
+	return r.spec.AllowNoBootstrappers
+}
+
 type VRFSpecResolver struct {
 	spec job.VRFSpec
 }
@@ -958,6 +1004,11 @@ func (r *BootstrapSpecResolver) ContractConfigConfirmations() *int32 {
 	return &confirmations
 }
 
+// RelayConfig resolves the spec's onchain signing strategy config
+func (r *OCR2SpecResolver) OnchainSigningStrategy() gqlscalar.Map {
+	return gqlscalar.Map(r.spec.OnchainSigningStrategy)
+}
+
 // CreatedAt resolves the spec's created at timestamp.
 func (r *BootstrapSpecResolver) CreatedAt() graphql.Time {
 	return graphql.Time{Time: r.spec.CreatedAt}
@@ -1005,4 +1056,82 @@ func (r *WorkflowSpecResolver) CreatedAt() graphql.Time {
 
 func (r *WorkflowSpecResolver) UpdatedAt() graphql.Time {
 	return graphql.Time{Time: r.spec.UpdatedAt}
+}
+
+type StandardCapabilitiesSpecResolver struct {
+	spec job.StandardCapabilitiesSpec
+}
+
+func (r *StandardCapabilitiesSpecResolver) ID() graphql.ID {
+	return graphql.ID(stringutils.FromInt32(r.spec.ID))
+}
+
+func (r *StandardCapabilitiesSpecResolver) CreatedAt() graphql.Time {
+	return graphql.Time{Time: r.spec.CreatedAt}
+}
+
+func (r *StandardCapabilitiesSpecResolver) Command() string {
+	return r.spec.Command
+}
+
+func (r *StandardCapabilitiesSpecResolver) Config() *string {
+	return &r.spec.Config
+}
+
+type StreamSpecResolver struct {
+	streamID *string
+}
+
+func (r *StreamSpecResolver) StreamID() *string {
+	return r.streamID
+}
+
+type CCIPSpecResolver struct {
+	spec job.CCIPSpec
+}
+
+func (r *CCIPSpecResolver) CreatedAt() graphql.Time {
+	return graphql.Time{Time: r.spec.CreatedAt}
+}
+
+func (r *CCIPSpecResolver) UpdatedAt() graphql.Time {
+	return graphql.Time{Time: r.spec.UpdatedAt}
+}
+
+func (r *CCIPSpecResolver) ID() graphql.ID {
+	return graphql.ID(stringutils.FromInt32(r.spec.ID))
+}
+
+func (r *CCIPSpecResolver) CapabilityLabelledName() string {
+	return r.spec.CapabilityLabelledName
+}
+
+func (r *CCIPSpecResolver) CapabilityVersion() string {
+	return r.spec.CapabilityVersion
+}
+
+func (r *CCIPSpecResolver) P2PV2Bootstrappers() *[]string {
+	if len(r.spec.P2PV2Bootstrappers) == 0 {
+		return nil
+	}
+
+	peers := []string(r.spec.P2PV2Bootstrappers)
+
+	return &peers
+}
+
+func (r *CCIPSpecResolver) OCRKeyBundleIDs() gqlscalar.Map {
+	return gqlscalar.Map(r.spec.OCRKeyBundleIDs)
+}
+
+func (r *CCIPSpecResolver) RelayConfigs() gqlscalar.Map {
+	return gqlscalar.Map(r.spec.RelayConfigs)
+}
+
+func (r *CCIPSpecResolver) PluginConfig() gqlscalar.Map {
+	return gqlscalar.Map(r.spec.PluginConfig)
+}
+
+func (r *CCIPSpecResolver) P2PKeyID() string {
+	return r.spec.P2PKeyID
 }

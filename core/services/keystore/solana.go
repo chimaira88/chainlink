@@ -6,10 +6,9 @@ import (
 
 	"github.com/pkg/errors"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/loop"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/solkey"
 )
-
-//go:generate mockery --quiet --name Solana --output ./mocks/ --case=underscore --filename solana.go
 
 type Solana interface {
 	Get(id string) (solkey.Key, error)
@@ -23,18 +22,20 @@ type Solana interface {
 	Sign(ctx context.Context, id string, msg []byte) (signature []byte, err error)
 }
 
-// SolanaSigner adapts Solana to [loop.Keystore].
-type SolanaSigner struct {
+// SolanaLooppSigner adapts Solana to [core.Keystore].
+type SolanaLooppSigner struct {
 	Solana
 }
 
-func (s *SolanaSigner) Accounts(ctx context.Context) (accounts []string, err error) {
+var _ loop.Keystore = &SolanaLooppSigner{}
+
+func (s *SolanaLooppSigner) Accounts(ctx context.Context) (accounts []string, err error) {
 	ks, err := s.GetAll()
 	if err != nil {
 		return nil, err
 	}
 	for _, k := range ks {
-		accounts = append(accounts, k.PublicKeyStr())
+		accounts = append(accounts, k.ID())
 	}
 	return
 }

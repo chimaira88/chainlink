@@ -8,7 +8,6 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// nolint
 var (
 	ErrEnvUnset = pkgerrors.New("env var unset")
 )
@@ -20,11 +19,14 @@ type AppConfig interface {
 	RootDir() string
 	ShutdownGracePeriod() time.Duration
 	InsecureFastScrypt() bool
+	InsecurePPROFHeap() bool
 	EVMEnabled() bool
-	EVMRPCEnabled() bool
 	CosmosEnabled() bool
 	SolanaEnabled() bool
 	StarkNetEnabled() bool
+	AptosEnabled() bool
+	TronEnabled() bool
+	TONEnabled() bool
 
 	Validate() error
 	ValidateDB() error
@@ -36,6 +38,7 @@ type AppConfig interface {
 	AuditLogger() AuditLogger
 	AutoPprof() AutoPprof
 	Capabilities() Capabilities
+	Workflows() Workflows
 	Database() Database
 	Feature() Feature
 	FluxMonitor() FluxMonitor
@@ -55,6 +58,9 @@ type AppConfig interface {
 	Threshold() Threshold
 	WebServer() WebServer
 	Tracing() Tracing
+	Telemetry() Telemetry
+	CRE() CRE
+	Billing() Billing
 }
 
 type DatabaseBackupMode string

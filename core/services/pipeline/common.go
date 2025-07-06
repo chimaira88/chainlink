@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"reflect"
 	"sort"
@@ -10,16 +11,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/google/uuid"
-	"github.com/mitchellh/mapstructure"
 	pkgerrors "github.com/pkg/errors"
 	"gopkg.in/guregu/null.v4"
 
 	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	cutils "github.com/smartcontractkit/chainlink-common/pkg/utils"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/jsonserializable"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+
+	"github.com/smartcontractkit/chainlink-evm/pkg/config"
 	cnull "github.com/smartcontractkit/chainlink/v2/core/null"
 )
 
@@ -28,6 +30,7 @@ const (
 	BlockhashStoreJobType          string = "blockhashstore"
 	BootstrapJobType               string = "bootstrap"
 	CronJobType                    string = "cron"
+	CCIPJobType                    string = "ccip"
 	DirectRequestJobType           string = "directrequest"
 	FluxMonitorJobType             string = "fluxmonitor"
 	GatewayJobType                 string = "gateway"
@@ -40,9 +43,8 @@ const (
 	VRFJobType                     string = "vrf"
 	WebhookJobType                 string = "webhook"
 	WorkflowJobType                string = "workflow"
+	StandardCapabilitiesJobType    string = "standardcapabilities"
 )
-
-//go:generate mockery --quiet --name Config --output ./mocks/ --case=underscore
 
 type (
 	Task interface {
@@ -58,6 +60,9 @@ type (
 		TaskRetries() uint32
 		TaskMinBackoff() time.Duration
 		TaskMaxBackoff() time.Duration
+		TaskTags() string
+		TaskStreamID() *uint32
+		GetDescendantTasks() []Task
 	}
 
 	Config interface {
@@ -230,7 +235,7 @@ func (trrs TaskRunResults) GetTaskRunResultsFinishedAt() time.Time {
 
 // FinalResult pulls the FinalResult for the pipeline_run from the task runs
 // It needs to respect the output index of each task
-func (trrs TaskRunResults) FinalResult(l logger.Logger) FinalResult {
+func (trrs TaskRunResults) FinalResult() FinalResult {
 	var found bool
 	var fr FinalResult
 	sort.Slice(trrs, func(i, j int) bool {
@@ -246,7 +251,7 @@ func (trrs TaskRunResults) FinalResult(l logger.Logger) FinalResult {
 	}
 
 	if !found {
-		l.Panicw("Expected at least one task to be final", "tasks", trrs)
+		panic(fmt.Sprintf("expected at least one task to be final: %v", trrs))
 	}
 	return fr
 }
@@ -262,6 +267,16 @@ func (trrs TaskRunResults) Terminals() (terminals []TaskRunResult) {
 }
 
 // GetNextTaskOf returns the task with the next id or nil if it does not exist
+func (trrs *TaskRunResults) GetTaskRunResultOf(task Task) *TaskRunResult {
+	for _, trr := range *trrs {
+		if trr.Task.Base().id == task.Base().id {
+			return &trr
+		}
+	}
+	return nil
+}
+
+// GetNextTaskOf returns the task with the next id or nil if it does not exist
 func (trrs *TaskRunResults) GetNextTaskOf(task TaskRunResult) *TaskRunResult {
 	nextID := task.Task.Base().id + 1
 
@@ -272,6 +287,16 @@ func (trrs *TaskRunResults) GetNextTaskOf(task TaskRunResult) *TaskRunResult {
 	}
 
 	return nil
+}
+
+func (trrs TaskRunResults) AllErrors() error {
+	var errs []error
+	for _, trr := range trrs {
+		if trr.Result.Error != nil {
+			errs = append(errs, trr.Result.Error)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 type TaskType string
@@ -415,9 +440,11 @@ func UnmarshalTaskFromMap(taskType TaskType, taskMap interface{}, ID int, dotID 
 		return nil, pkgerrors.Errorf(`unknown task type: "%v"`, taskType)
 	}
 
+	metadata := mapstructure.Metadata{}
 	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
 		Result:           task,
 		WeaklyTypedInput: true,
+		Metadata:         &metadata,
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
 			mapstructure.StringToTimeDurationHookFunc(),
 			func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
@@ -441,6 +468,23 @@ func UnmarshalTaskFromMap(taskType TaskType, taskMap interface{}, ID int, dotID 
 	if err != nil {
 		return nil, err
 	}
+
+	// valid explicit index values are 0-based
+	for _, key := range metadata.Keys {
+		if key == "index" {
+			if task.OutputIndex() < 0 {
+				return nil, errors.New("result sorting indexes should start with 0")
+			}
+		}
+	}
+
+	// the 'unset' value should be -1 to allow explicit indexes to be 0-based
+	for _, key := range metadata.Unset {
+		if key == "index" {
+			task.Base().Index = -1
+		}
+	}
+
 	return task, nil
 }
 
@@ -504,4 +548,27 @@ func selectBlock(block string) (string, error) {
 		return block, nil
 	}
 	return "", pkgerrors.Errorf("unsupported block param: %s", block)
+}
+
+// WithTelemetry adds an optional telemetry channel to the context. If ch is
+// non-nil, certain tasks MAY choose to send arbitrary telemetry data on this
+// channel. The provided channel SHOULD be buffered, but if it blocks, the task
+// SHOULD NOT block.
+type contextKey string
+
+const ctxTelemetryKey contextKey = "telemetry"
+
+func WithTelemetryCh(ctx context.Context, ch chan<- interface{}) context.Context {
+	if ch == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxTelemetryKey, ch)
+}
+
+func GetTelemetryCh(ctx context.Context) chan<- interface{} {
+	ch, ok := ctx.Value(ctxTelemetryKey).(chan<- interface{})
+	if !ok {
+		return nil
+	}
+	return ch
 }

@@ -5,6 +5,7 @@ import (
 	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -15,17 +16,16 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind/backends"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/core"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
-	"github.com/hashicorp/consul/sdk/freeport"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/umbracle/ethgo/abi"
+
+	"github.com/smartcontractkit/freeport"
 
 	"github.com/smartcontractkit/libocr/commontypes"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/confighelper"
@@ -34,27 +34,30 @@ import (
 
 	"github.com/smartcontractkit/chainlink-automation/pkg/v3/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/types"
+	"github.com/smartcontractkit/chainlink-common/pkg/utils/tests"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
-	automationForwarderLogic "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/automation_forwarder_logic"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/basic_upkeep_contract"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/dummy_protocol_wrapper"
-	iregistry21 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/i_keeper_registry_master_wrapper_2_1"
-	registrylogica21 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/keeper_registry_logic_a_wrapper_2_1"
-	registrylogicb21 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/keeper_registry_logic_b_wrapper_2_1"
-	registry21 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/keeper_registry_wrapper_2_1"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/link_token_interface"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/log_triggered_streams_lookup_wrapper"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/log_upkeep_counter_wrapper"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/mock_v3_aggregator_contract"
+	automationForwarderLogic "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/automation_forwarder_logic"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/basic_upkeep_contract"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/dummy_protocol_wrapper"
+	iregistry21 "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/i_keeper_registry_master_wrapper_2_1"
+	registrylogica21 "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/keeper_registry_logic_a_wrapper_2_1"
+	registrylogicb21 "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/keeper_registry_logic_b_wrapper_2_1"
+	registry21 "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/keeper_registry_wrapper_2_1"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/link_token_interface"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/log_triggered_streams_lookup_wrapper"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/log_upkeep_counter_wrapper"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/mock_v3_aggregator_contract"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/logpoller"
+	evmtestutils "github.com/smartcontractkit/chainlink-evm/pkg/testutils"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ethkey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper"
-	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/logprovider"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/mercury"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/mercury/streams"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
@@ -91,10 +94,10 @@ func TestIntegration_KeeperPluginConditionalUpkeep(t *testing.T) {
 	lggr := logger.TestLogger(t)
 
 	// setup blockchain
-	sergey := testutils.MustNewSimTransactor(t) // owns all the link
-	steve := testutils.MustNewSimTransactor(t)  // registry owner
-	carrol := testutils.MustNewSimTransactor(t) // upkeep owner
-	genesisData := core.GenesisAlloc{
+	sergey := evmtestutils.MustNewSimTransactor(t) // owns all the link
+	steve := evmtestutils.MustNewSimTransactor(t)  // registry owner
+	carrol := evmtestutils.MustNewSimTransactor(t) // upkeep owner
+	genesisData := gethtypes.GenesisAlloc{
 		sergey.From: {Balance: assets.Ether(10000).ToInt()},
 		steve.From:  {Balance: assets.Ether(10000).ToInt()},
 		carrol.From: {Balance: assets.Ether(10000).ToInt()},
@@ -103,23 +106,26 @@ func TestIntegration_KeeperPluginConditionalUpkeep(t *testing.T) {
 	var nodeKeys [5]ethkey.KeyV2
 	for i := int64(0); i < 5; i++ {
 		nodeKeys[i] = cltest.MustGenerateRandomKey(t)
-		genesisData[nodeKeys[i].Address] = core.GenesisAccount{Balance: assets.Ether(1000).ToInt()}
+		genesisData[nodeKeys[i].Address] = gethtypes.Account{Balance: assets.Ether(1000).ToInt()}
 	}
 
-	backend := cltest.NewSimulatedBackend(t, genesisData, uint32(ethconfig.Defaults.Miner.GasCeil))
-	stopMining := cltest.Mine(backend, 3*time.Second) // Should be greater than deltaRound since we cannot access old blocks on simulated blockchain
+	backend := cltest.NewSimulatedBackend(t, genesisData, ethconfig.Defaults.Miner.GasCeil)
+	_, stopMining := cltest.Mine(backend, 3*time.Second) // Should be greater than deltaRound since we cannot access old blocks on simulated blockchain
 	defer stopMining()
 
 	// Deploy registry
-	linkAddr, _, linkToken, err := link_token_interface.DeployLinkToken(sergey, backend)
+	linkAddr, _, linkToken, err := link_token_interface.DeployLinkToken(sergey, backend.Client())
 	require.NoError(t, err)
-	gasFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(steve, backend, 18, big.NewInt(60000000000))
+	backend.Commit()
+	gasFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(steve, backend.Client(), 18, big.NewInt(60000000000))
 	require.NoError(t, err)
-	linkFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(steve, backend, 18, big.NewInt(2000000000000000000))
+	backend.Commit()
+	linkFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(steve, backend.Client(), 18, big.NewInt(2000000000000000000))
 	require.NoError(t, err)
+	backend.Commit()
 	registry := deployKeeper21Registry(t, steve, backend, linkAddr, linkFeedAddr, gasFeedAddr)
 
-	setupNodes(t, nodeKeys, registry, backend, steve, false)
+	setupNodes(t, nodeKeys, registry, backend, steve)
 
 	<-time.After(time.Second * 5)
 
@@ -127,20 +133,24 @@ func TestIntegration_KeeperPluginConditionalUpkeep(t *testing.T) {
 
 	_, err = linkToken.Transfer(sergey, carrol.From, big.NewInt(0).Mul(oneHunEth, big.NewInt(int64(upkeeps+1))))
 	require.NoError(t, err)
+	backend.Commit()
 
 	// Register new upkeep
-	upkeepAddr, _, upkeepContract, err := basic_upkeep_contract.DeployBasicUpkeepContract(carrol, backend)
+	upkeepAddr, _, upkeepContract, err := basic_upkeep_contract.DeployBasicUpkeepContract(carrol, backend.Client())
 	require.NoError(t, err)
+	backend.Commit()
 	registrationTx, err := registry.RegisterUpkeep(steve, upkeepAddr, 2_500_000, carrol.From, 0, []byte{}, []byte{}, []byte{})
 	require.NoError(t, err)
 	backend.Commit()
-	upkeepID := getUpkeepIdFromTx21(t, registry, registrationTx, backend)
+	upkeepID := getUpkeepIDFromTx21(t, registry, registrationTx, backend)
 
 	// Fund the upkeep
 	_, err = linkToken.Transfer(sergey, carrol.From, oneHunEth)
 	require.NoError(t, err)
+	backend.Commit()
 	_, err = linkToken.Approve(carrol, registry.Address(), oneHunEth)
 	require.NoError(t, err)
+	backend.Commit()
 	_, err = registry.AddFunds(carrol, upkeepID, oneHunEth)
 	require.NoError(t, err)
 	backend.Commit()
@@ -148,6 +158,7 @@ func TestIntegration_KeeperPluginConditionalUpkeep(t *testing.T) {
 	// Set upkeep to be performed
 	_, err = upkeepContract.SetBytesToSend(carrol, payload1)
 	require.NoError(t, err)
+	backend.Commit()
 	_, err = upkeepContract.SetShouldPerformUpkeep(carrol, true)
 	require.NoError(t, err)
 	backend.Commit()
@@ -165,376 +176,337 @@ func TestIntegration_KeeperPluginConditionalUpkeep(t *testing.T) {
 	// change payload
 	_, err = upkeepContract.SetBytesToSend(carrol, payload2)
 	require.NoError(t, err)
+	backend.Commit()
 	_, err = upkeepContract.SetShouldPerformUpkeep(carrol, true)
 	require.NoError(t, err)
+	backend.Commit()
 
 	// observe 2nd job run and received payload changes
 	g.Eventually(receivedBytes, testutils.WaitTimeout(t), cltest.DBPollingInterval).Should(gomega.Equal(payload2))
 }
 
 func TestIntegration_KeeperPluginLogUpkeep(t *testing.T) {
-	tests := []struct {
-		name             string
-		logBufferVersion logprovider.BufferVersion
-	}{
-		{
-			name:             "default buffer",
-			logBufferVersion: logprovider.BufferVersionDefault,
-		},
-		{
-			name:             "buffer v1",
-			logBufferVersion: logprovider.BufferVersionV1,
-		},
+	t.Skip("fails after geth upgrade https://github.com/smartcontractkit/chainlink/pull/11809; DEPENDENT ON SPECIFIC BLOCK PATTTERN?")
+	g := gomega.NewWithT(t)
+
+	// setup blockchain
+	sergey := evmtestutils.MustNewSimTransactor(t) // owns all the link
+	steve := evmtestutils.MustNewSimTransactor(t)  // registry owner
+	carrol := evmtestutils.MustNewSimTransactor(t) // upkeep owner
+	genesisData := gethtypes.GenesisAlloc{
+		sergey.From: {Balance: assets.Ether(10000).ToInt()},
+		steve.From:  {Balance: assets.Ether(10000).ToInt()},
+		carrol.From: {Balance: assets.Ether(10000).ToInt()},
+	}
+	// Generate 5 keys for nodes (1 bootstrap + 4 ocr nodes) and fund them with ether
+	var nodeKeys [5]ethkey.KeyV2
+	for i := int64(0); i < 5; i++ {
+		nodeKeys[i] = cltest.MustGenerateRandomKey(t)
+		genesisData[nodeKeys[i].Address] = gethtypes.Account{Balance: assets.Ether(1000).ToInt()}
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			g := gomega.NewWithT(t)
+	backend := cltest.NewSimulatedBackend(t, genesisData, ethconfig.Defaults.Miner.GasCeil)
+	commit, stopMining := cltest.Mine(backend, 3*time.Second) // Should be greater than deltaRound since we cannot access old blocks on simulated blockchain
+	defer stopMining()
 
-			// setup blockchain
-			sergey := testutils.MustNewSimTransactor(t) // owns all the link
-			steve := testutils.MustNewSimTransactor(t)  // registry owner
-			carrol := testutils.MustNewSimTransactor(t) // upkeep owner
-			genesisData := core.GenesisAlloc{
-				sergey.From: {Balance: assets.Ether(10000).ToInt()},
-				steve.From:  {Balance: assets.Ether(10000).ToInt()},
-				carrol.From: {Balance: assets.Ether(10000).ToInt()},
+	// Deploy registry
+	linkAddr, _, linkToken, err := link_token_interface.DeployLinkToken(sergey, backend.Client())
+	require.NoError(t, err)
+	commit()
+	gasFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(steve, backend.Client(), 18, big.NewInt(60000000000))
+	require.NoError(t, err)
+	commit()
+	linkFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(steve, backend.Client(), 18, big.NewInt(2000000000000000000))
+	require.NoError(t, err)
+	commit()
+
+	registry := deployKeeper21Registry(t, steve, backend, linkAddr, linkFeedAddr, gasFeedAddr)
+	setupNodes(t, nodeKeys, registry, backend, steve)
+	upkeeps := 1
+
+	_, err = linkToken.Transfer(sergey, carrol.From, big.NewInt(0).Mul(oneHunEth, big.NewInt(int64(upkeeps+1))))
+	require.NoError(t, err)
+	commit()
+
+	ids, addrs, contracts := deployUpkeeps(t, backend, carrol, steve, linkToken, registry, upkeeps)
+	require.Len(t, ids, upkeeps)
+	require.Equal(t, len(ids), len(contracts))
+	require.Equal(t, len(ids), len(addrs))
+
+	commit()
+
+	emits := 1
+	go emitEvents(testutils.Context(t), t, emits, contracts, carrol, func() {
+		commit()
+	})
+
+	listener, done := listenPerformed(t, backend, registry, ids, int64(1))
+	g.Eventually(listener, testutils.WaitTimeout(t), cltest.DBPollingInterval).Should(gomega.BeTrue())
+	done()
+
+	t.Run("recover logs", func(t *testing.T) {
+		addr, contract := addrs[0], contracts[0]
+		upkeepID := registerUpkeep(t, registry, addr, carrol, steve, backend)
+		commit()
+		t.Logf("Registered new upkeep %s for address %s", upkeepID.String(), addr.String())
+		// Emit 100 logs in a burst
+		recoverEmits := 100
+		i := 0
+		emitEvents(testutils.Context(t), t, 100, []*log_upkeep_counter_wrapper.LogUpkeepCounter{contract}, carrol, func() {
+			i++
+			if i%(recoverEmits/4) == 0 {
+				commit()
+				time.Sleep(time.Millisecond * 250) // otherwise we get "invalid transaction nonce" errors
 			}
-			// Generate 5 keys for nodes (1 bootstrap + 4 ocr nodes) and fund them with ether
-			var nodeKeys [5]ethkey.KeyV2
-			for i := int64(0); i < 5; i++ {
-				nodeKeys[i] = cltest.MustGenerateRandomKey(t)
-				genesisData[nodeKeys[i].Address] = core.GenesisAccount{Balance: assets.Ether(1000).ToInt()}
-			}
-
-			backend := cltest.NewSimulatedBackend(t, genesisData, uint32(ethconfig.Defaults.Miner.GasCeil))
-			stopMining := cltest.Mine(backend, 3*time.Second) // Should be greater than deltaRound since we cannot access old blocks on simulated blockchain
-			defer stopMining()
-
-			// Deploy registry
-			linkAddr, _, linkToken, err := link_token_interface.DeployLinkToken(sergey, backend)
-			require.NoError(t, err)
-			gasFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(steve, backend, 18, big.NewInt(60000000000))
-			require.NoError(t, err)
-			linkFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(steve, backend, 18, big.NewInt(2000000000000000000))
-			require.NoError(t, err)
-
-			registry := deployKeeper21Registry(t, steve, backend, linkAddr, linkFeedAddr, gasFeedAddr)
-			setupNodes(t, nodeKeys, registry, backend, steve, tc.logBufferVersion == logprovider.BufferVersionV1)
-			upkeeps := 1
-
-			_, err = linkToken.Transfer(sergey, carrol.From, big.NewInt(0).Mul(oneHunEth, big.NewInt(int64(upkeeps+1))))
-			require.NoError(t, err)
-
-			backend.Commit()
-
-			ids, addrs, contracts := deployUpkeeps(t, backend, carrol, steve, linkToken, registry, upkeeps)
-			require.Equal(t, upkeeps, len(ids))
-			require.Equal(t, len(ids), len(contracts))
-			require.Equal(t, len(ids), len(addrs))
-
-			backend.Commit()
-
-			emits := 1
-			go emitEvents(testutils.Context(t), t, emits, contracts, carrol, func() {
-				backend.Commit()
-			})
-
-			listener, done := listenPerformed(t, backend, registry, ids, int64(1))
-			g.Eventually(listener, testutils.WaitTimeout(t), cltest.DBPollingInterval).Should(gomega.BeTrue())
-			done()
-
-			t.Run("recover logs", func(t *testing.T) {
-				addr, contract := addrs[0], contracts[0]
-				upkeepID := registerUpkeep(t, registry, addr, carrol, steve, backend)
-				backend.Commit()
-				t.Logf("Registered new upkeep %s for address %s", upkeepID.String(), addr.String())
-				// Emit 100 logs in a burst
-				recoverEmits := 100
-				i := 0
-				emitEvents(testutils.Context(t), t, 100, []*log_upkeep_counter_wrapper.LogUpkeepCounter{contract}, carrol, func() {
-					i++
-					if i%(recoverEmits/4) == 0 {
-						backend.Commit()
-						time.Sleep(time.Millisecond * 250) // otherwise we get "invalid transaction nonce" errors
-					}
-				})
-
-				beforeDummyBlocks := backend.Blockchain().CurrentBlock().Number.Uint64()
-
-				// Mine enough blocks to ensure these logs don't fall into log provider range
-				dummyBlocks := 500
-				for i := 0; i < dummyBlocks; i++ {
-					backend.Commit()
-					time.Sleep(time.Millisecond * 10)
-				}
-
-				t.Logf("Mined %d blocks, waiting for logs to be recovered", dummyBlocks)
-
-				listener, done := listenPerformedN(t, backend, registry, ids, int64(beforeDummyBlocks), recoverEmits)
-				defer done()
-				g.Eventually(listener, testutils.WaitTimeout(t), cltest.DBPollingInterval).Should(gomega.BeTrue())
-			})
 		})
-	}
+
+		h, err := backend.Client().HeaderByNumber(testutils.Context(t), nil)
+		require.NoError(t, err)
+		beforeDummyBlocks := h.Number.Uint64()
+
+		// Mine enough blocks to ensure these logs don't fall into log provider range
+		dummyBlocks := 500
+		for i := 0; i < dummyBlocks; i++ {
+			commit()
+			time.Sleep(time.Millisecond * 10)
+		}
+
+		t.Logf("Mined %d blocks, waiting for logs to be recovered", dummyBlocks)
+
+		listener, done := listenPerformedN(t, backend, registry, ids, int64(beforeDummyBlocks), recoverEmits)
+		defer done()
+		g.Eventually(listener, testutils.WaitTimeout(t), cltest.DBPollingInterval).Should(gomega.BeTrue())
+	})
 }
 
 func TestIntegration_KeeperPluginLogUpkeep_Retry(t *testing.T) {
-	tests := []struct {
-		name             string
-		logBufferVersion logprovider.BufferVersion
-	}{
-		{
-			name:             "default buffer",
-			logBufferVersion: logprovider.BufferVersionDefault,
-		},
-		{
-			name:             "buffer v1",
-			logBufferVersion: logprovider.BufferVersionV1,
-		},
+	tests.SkipFlakey(t, "https://smartcontract-it.atlassian.net/browse/DX-575")
+
+	g := gomega.NewWithT(t)
+
+	// setup blockchain
+	linkOwner := evmtestutils.MustNewSimTransactor(t)     // owns all the link
+	registryOwner := evmtestutils.MustNewSimTransactor(t) // registry owner
+	upkeepOwner := evmtestutils.MustNewSimTransactor(t)   // upkeep owner
+	genesisData := gethtypes.GenesisAlloc{
+		linkOwner.From:     {Balance: assets.Ether(10000).ToInt()},
+		registryOwner.From: {Balance: assets.Ether(10000).ToInt()},
+		upkeepOwner.From:   {Balance: assets.Ether(10000).ToInt()},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			g := gomega.NewWithT(t)
+	// Generate 5 keys for nodes (1 bootstrap + 4 ocr nodes) and fund them with ether
+	var nodeKeys [5]ethkey.KeyV2
+	for i := int64(0); i < 5; i++ {
+		nodeKeys[i] = cltest.MustGenerateRandomKey(t)
+		genesisData[nodeKeys[i].Address] = gethtypes.Account{Balance: assets.Ether(1000).ToInt()}
+	}
 
-			// setup blockchain
-			linkOwner := testutils.MustNewSimTransactor(t)     // owns all the link
-			registryOwner := testutils.MustNewSimTransactor(t) // registry owner
-			upkeepOwner := testutils.MustNewSimTransactor(t)   // upkeep owner
-			genesisData := core.GenesisAlloc{
-				linkOwner.From:     {Balance: assets.Ether(10000).ToInt()},
-				registryOwner.From: {Balance: assets.Ether(10000).ToInt()},
-				upkeepOwner.From:   {Balance: assets.Ether(10000).ToInt()},
-			}
+	backend := cltest.NewSimulatedBackend(t, genesisData, ethconfig.Defaults.Miner.GasCeil)
+	commit, stopMining := cltest.Mine(backend, 3*time.Second) // Should be greater than deltaRound since we cannot access old blocks on simulated blockchain
+	defer stopMining()
 
-			// Generate 5 keys for nodes (1 bootstrap + 4 ocr nodes) and fund them with ether
-			var nodeKeys [5]ethkey.KeyV2
-			for i := int64(0); i < 5; i++ {
-				nodeKeys[i] = cltest.MustGenerateRandomKey(t)
-				genesisData[nodeKeys[i].Address] = core.GenesisAccount{Balance: assets.Ether(1000).ToInt()}
-			}
+	// Deploy registry
+	linkAddr, _, linkToken, err := link_token_interface.DeployLinkToken(linkOwner, backend.Client())
+	require.NoError(t, err)
+	commit()
 
-			backend := cltest.NewSimulatedBackend(t, genesisData, uint32(ethconfig.Defaults.Miner.GasCeil))
-			stopMining := cltest.Mine(backend, 3*time.Second) // Should be greater than deltaRound since we cannot access old blocks on simulated blockchain
-			defer stopMining()
+	gasFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(registryOwner, backend.Client(), 18, big.NewInt(60000000000))
+	require.NoError(t, err)
+	commit()
 
-			// Deploy registry
-			linkAddr, _, linkToken, err := link_token_interface.DeployLinkToken(linkOwner, backend)
-			require.NoError(t, err)
+	linkFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(registryOwner, backend.Client(), 18, big.NewInt(2000000000000000000))
+	require.NoError(t, err)
+	commit()
 
-			gasFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(registryOwner, backend, 18, big.NewInt(60000000000))
-			require.NoError(t, err)
+	registry := deployKeeper21Registry(t, registryOwner, backend, linkAddr, linkFeedAddr, gasFeedAddr)
 
-			linkFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(registryOwner, backend, 18, big.NewInt(2000000000000000000))
-			require.NoError(t, err)
+	_, mercuryServer := setupNodes(t, nodeKeys, registry, backend, registryOwner)
 
-			registry := deployKeeper21Registry(t, registryOwner, backend, linkAddr, linkFeedAddr, gasFeedAddr)
+	const upkeepCount = 10
+	const mercuryFailCount = upkeepCount * 3 * 2
 
-			_, mercuryServer := setupNodes(t, nodeKeys, registry, backend, registryOwner, tc.logBufferVersion == logprovider.BufferVersionV1)
+	// testing with the mercury server involves mocking responses. currently,
+	// there is not a way to connect a mercury call to an upkeep id (though we
+	// could add custom headers) so the test must be fairly basic and just
+	// count calls before switching to successes
+	var (
+		mu    sync.Mutex
+		count int
+	)
 
-			const upkeepCount = 10
-			const mercuryFailCount = upkeepCount * 3 * 2
+	mercuryServer.RegisterHandler(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
 
-			// testing with the mercury server involves mocking responses. currently,
-			// there is not a way to connect a mercury call to an upkeep id (though we
-			// could add custom headers) so the test must be fairly basic and just
-			// count calls before switching to successes
-			var (
-				mu    sync.Mutex
-				count int
-			)
+		count++
 
-			mercuryServer.RegisterHandler(func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				defer mu.Unlock()
+		_ = r.ParseForm()
 
-				count++
+		t.Logf("MercuryHTTPServe:RequestURI: %s", r.RequestURI)
 
-				_ = r.ParseForm()
+		for key, value := range r.Form {
+			t.Logf("MercuryHTTPServe:FormValue: key: %s; value: %s;", key, value)
+		}
 
-				t.Logf("MercuryHTTPServe:RequestURI: %s", r.RequestURI)
+		// the streams lookup retries against the remote server 3 times before
+		// returning a result as retryable.
+		// the simulation here should force the streams lookup process to return
+		// retryable 2 times.
+		// the total count of failures should be (upkeepCount * 3 * tryCount)
+		if count <= mercuryFailCount {
+			w.WriteHeader(http.StatusNotFound)
 
-				for key, value := range r.Form {
-					t.Logf("MercuryHTTPServe:FormValue: key: %s; value: %s;", key, value)
-				}
+			return
+		}
 
-				// the streams lookup retries against the remote server 3 times before
-				// returning a result as retryable.
-				// the simulation here should force the streams lookup process to return
-				// retryable 2 times.
-				// the total count of failures should be (upkeepCount * 3 * tryCount)
-				if count <= mercuryFailCount {
-					w.WriteHeader(http.StatusNotFound)
+		// start sending success messages
+		output := `{"chainlinkBlob":"0x0001c38d71fed6c320b90e84b6f559459814d068e2a1700adc931ca9717d4fe70000000000000000000000000000000000000000000000000000000001a80b52b4bf1233f9cb71144a253a1791b202113c4ab4a92fa1b176d684b4959666ff8200000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000260000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001004254432d5553442d415242495452554d2d544553544e4554000000000000000000000000000000000000000000000000000000000000000000000000645570be000000000000000000000000000000000000000000000000000002af2b818dc5000000000000000000000000000000000000000000000000000002af2426faf3000000000000000000000000000000000000000000000000000002af32dc209700000000000000000000000000000000000000000000000000000000012130f8df0a9745bb6ad5e2df605e158ba8ad8a33ef8a0acf9851f0f01668a3a3f2b68600000000000000000000000000000000000000000000000000000000012130f60000000000000000000000000000000000000000000000000000000000000002c4a7958dce105089cf5edb68dad7dcfe8618d7784eb397f97d5a5fade78c11a58275aebda478968e545f7e3657aba9dcbe8d44605e4c6fde3e24edd5e22c94270000000000000000000000000000000000000000000000000000000000000002459c12d33986018a8959566d145225f0c4a4e61a9a3f50361ccff397899314f0018162cf10cd89897635a0bb62a822355bd199d09f4abe76e4d05261bb44733d"}`
 
-					return
-				}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(output))
+	})
 
-				// start sending success messages
-				output := `{"chainlinkBlob":"0x0001c38d71fed6c320b90e84b6f559459814d068e2a1700adc931ca9717d4fe70000000000000000000000000000000000000000000000000000000001a80b52b4bf1233f9cb71144a253a1791b202113c4ab4a92fa1b176d684b4959666ff8200000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000260000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001004254432d5553442d415242495452554d2d544553544e4554000000000000000000000000000000000000000000000000000000000000000000000000645570be000000000000000000000000000000000000000000000000000002af2b818dc5000000000000000000000000000000000000000000000000000002af2426faf3000000000000000000000000000000000000000000000000000002af32dc209700000000000000000000000000000000000000000000000000000000012130f8df0a9745bb6ad5e2df605e158ba8ad8a33ef8a0acf9851f0f01668a3a3f2b68600000000000000000000000000000000000000000000000000000000012130f60000000000000000000000000000000000000000000000000000000000000002c4a7958dce105089cf5edb68dad7dcfe8618d7784eb397f97d5a5fade78c11a58275aebda478968e545f7e3657aba9dcbe8d44605e4c6fde3e24edd5e22c94270000000000000000000000000000000000000000000000000000000000000002459c12d33986018a8959566d145225f0c4a4e61a9a3f50361ccff397899314f0018162cf10cd89897635a0bb62a822355bd199d09f4abe76e4d05261bb44733d"}`
+	defer mercuryServer.Stop()
 
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(output))
-			})
+	_, err = linkToken.Transfer(linkOwner, upkeepOwner.From, big.NewInt(0).Mul(oneHunEth, big.NewInt(int64(upkeepCount+1))))
+	require.NoError(t, err)
+	backend.Commit()
 
-			defer mercuryServer.Stop()
+	feeds, err := newFeedLookupUpkeepController(backend, registryOwner)
+	require.NoError(t, err, "no error expected from creating a feed lookup controller")
+	backend.Commit()
 
-			_, err = linkToken.Transfer(linkOwner, upkeepOwner.From, big.NewInt(0).Mul(oneHunEth, big.NewInt(int64(upkeepCount+1))))
-			require.NoError(t, err)
+	// deploy multiple upkeeps that listen to a log emitter and need to be
+	// performed for each log event
+	_ = feeds.DeployUpkeeps(t, backend, upkeepOwner, upkeepCount, func(int) bool {
+		return false
+	})
+	_ = feeds.RegisterAndFund(t, registry, registryOwner, backend, linkToken)
+	_ = feeds.EnableMercury(t, backend, commit, registry, registryOwner)
+	_ = feeds.VerifyEnv(t, registry, registryOwner)
 
-			backend.Commit()
-
-			feeds, err := newFeedLookupUpkeepController(backend, registryOwner)
-			require.NoError(t, err, "no error expected from creating a feed lookup controller")
-
-			// deploy multiple upkeeps that listen to a log emitter and need to be
-			// performed for each log event
-			_ = feeds.DeployUpkeeps(t, backend, upkeepOwner, upkeepCount, func(int) bool {
-				return false
-			})
-			_ = feeds.RegisterAndFund(t, registry, registryOwner, backend, linkToken)
-			_ = feeds.EnableMercury(t, backend, registry, registryOwner)
-			_ = feeds.VerifyEnv(t, backend, registry, registryOwner)
-
-			// start emitting events in a separate go-routine
-			// feed lookup relies on a single contract event log to perform multiple
-			// listener contracts
-			go func() {
-				// only 1 event is necessary to make all 10 upkeeps eligible
-				_ = feeds.EmitEvents(t, backend, 1, func() {
-					// pause per emit for expected block production time
-					time.Sleep(3 * time.Second)
-				})
-			}()
-
-			listener, done := listenPerformed(t, backend, registry, feeds.UpkeepsIds(), int64(1))
-			defer done()
-			g.Eventually(listener, testutils.WaitTimeout(t)-(5*time.Second), cltest.DBPollingInterval).Should(gomega.BeTrue())
+	// start emitting events in a separate go-routine
+	// feed lookup relies on a single contract event log to perform multiple
+	// listener contracts
+	go func() {
+		// only 1 event is necessary to make all 10 upkeeps eligible
+		_ = feeds.EmitEvents(t, backend, 1, func() {
+			// pause per emit for expected block production time
+			time.Sleep(3 * time.Second)
 		})
-	}
+	}()
+
+	listener, done := listenPerformed(t, backend, registry, feeds.UpkeepsIds(), int64(1))
+	defer done()
+	g.Eventually(listener, testutils.WaitTimeout(t)-(5*time.Second), cltest.DBPollingInterval).Should(gomega.BeTrue())
 }
 
 func TestIntegration_KeeperPluginLogUpkeep_ErrHandler(t *testing.T) {
-	tests := []struct {
-		name             string
-		logBufferVersion logprovider.BufferVersion
-	}{
-		{
-			name:             "default buffer",
-			logBufferVersion: logprovider.BufferVersionDefault,
-		},
-		{
-			name:             "buffer v1",
-			logBufferVersion: logprovider.BufferVersionV1,
-		},
+	g := gomega.NewWithT(t)
+
+	// setup blockchain
+	linkOwner := evmtestutils.MustNewSimTransactor(t)     // owns all the link
+	registryOwner := evmtestutils.MustNewSimTransactor(t) // registry owner
+	upkeepOwner := evmtestutils.MustNewSimTransactor(t)   // upkeep owner
+	genesisData := gethtypes.GenesisAlloc{
+		linkOwner.From:     {Balance: assets.Ether(10000).ToInt()},
+		registryOwner.From: {Balance: assets.Ether(10000).ToInt()},
+		upkeepOwner.From:   {Balance: assets.Ether(10000).ToInt()},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			g := gomega.NewWithT(t)
+	// Generate 5 keys for nodes (1 bootstrap + 4 ocr nodes) and fund them with ether
+	var nodeKeys [5]ethkey.KeyV2
+	for i := int64(0); i < 5; i++ {
+		nodeKeys[i] = cltest.MustGenerateRandomKey(t)
+		genesisData[nodeKeys[i].Address] = gethtypes.Account{Balance: assets.Ether(1000).ToInt()}
+	}
 
-			// setup blockchain
-			linkOwner := testutils.MustNewSimTransactor(t)     // owns all the link
-			registryOwner := testutils.MustNewSimTransactor(t) // registry owner
-			upkeepOwner := testutils.MustNewSimTransactor(t)   // upkeep owner
-			genesisData := core.GenesisAlloc{
-				linkOwner.From:     {Balance: assets.Ether(10000).ToInt()},
-				registryOwner.From: {Balance: assets.Ether(10000).ToInt()},
-				upkeepOwner.From:   {Balance: assets.Ether(10000).ToInt()},
-			}
+	backend := cltest.NewSimulatedBackend(t, genesisData, ethconfig.Defaults.Miner.GasCeil)
+	commit, stopMining := cltest.Mine(backend, 3*time.Second) // Should be greater than deltaRound since we cannot access old blocks on simulated blockchain
+	defer stopMining()
 
-			// Generate 5 keys for nodes (1 bootstrap + 4 ocr nodes) and fund them with ether
-			var nodeKeys [5]ethkey.KeyV2
-			for i := int64(0); i < 5; i++ {
-				nodeKeys[i] = cltest.MustGenerateRandomKey(t)
-				genesisData[nodeKeys[i].Address] = core.GenesisAccount{Balance: assets.Ether(1000).ToInt()}
-			}
+	// Deploy registry
+	linkAddr, _, linkToken, err := link_token_interface.DeployLinkToken(linkOwner, backend.Client())
+	require.NoError(t, err)
+	commit()
 
-			backend := cltest.NewSimulatedBackend(t, genesisData, uint32(ethconfig.Defaults.Miner.GasCeil))
-			stopMining := cltest.Mine(backend, 3*time.Second) // Should be greater than deltaRound since we cannot access old blocks on simulated blockchain
-			defer stopMining()
+	gasFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(registryOwner, backend.Client(), 18, big.NewInt(60000000000))
+	require.NoError(t, err)
+	commit()
 
-			// Deploy registry
-			linkAddr, _, linkToken, err := link_token_interface.DeployLinkToken(linkOwner, backend)
-			require.NoError(t, err)
+	linkFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(registryOwner, backend.Client(), 18, big.NewInt(2000000000000000000))
+	require.NoError(t, err)
+	commit()
 
-			gasFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(registryOwner, backend, 18, big.NewInt(60000000000))
-			require.NoError(t, err)
+	registry := deployKeeper21Registry(t, registryOwner, backend, linkAddr, linkFeedAddr, gasFeedAddr)
 
-			linkFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(registryOwner, backend, 18, big.NewInt(2000000000000000000))
-			require.NoError(t, err)
+	_, mercuryServer := setupNodes(t, nodeKeys, registry, backend, registryOwner)
 
-			registry := deployKeeper21Registry(t, registryOwner, backend, linkAddr, linkFeedAddr, gasFeedAddr)
+	upkeepCount := 10
 
-			_, mercuryServer := setupNodes(t, nodeKeys, registry, backend, registryOwner, tc.logBufferVersion == logprovider.BufferVersionV1)
+	errResponses := []int{
+		http.StatusUnauthorized,
+		http.StatusBadRequest,
+		http.StatusInternalServerError,
+		http.StatusNotFound,
+		http.StatusNotFound,
+		http.StatusNotFound,
+		http.StatusUnauthorized,
+	}
+	startMercuryServer(t, mercuryServer, func(i int) (int, []byte) {
+		var resp int
+		if i < len(errResponses) {
+			resp = errResponses[i]
+		}
+		if resp == 0 {
+			resp = http.StatusNotFound
+		}
+		return resp, nil
+	})
+	defer mercuryServer.Stop()
 
-			upkeepCount := 10
+	_, err = linkToken.Transfer(linkOwner, upkeepOwner.From, big.NewInt(0).Mul(oneHunEth, big.NewInt(int64(upkeepCount+1))))
+	require.NoError(t, err)
+	commit()
 
-			errResponses := []int{
-				http.StatusUnauthorized,
-				http.StatusBadRequest,
-				http.StatusInternalServerError,
-				http.StatusNotFound,
-				http.StatusNotFound,
-				http.StatusNotFound,
-				http.StatusUnauthorized,
-			}
-			startMercuryServer(t, mercuryServer, func(i int) (int, []byte) {
-				var resp int
-				if i < len(errResponses) {
-					resp = errResponses[i]
-				}
-				if resp == 0 {
-					resp = http.StatusNotFound
-				}
-				return resp, nil
-			})
-			defer mercuryServer.Stop()
+	feeds, err := newFeedLookupUpkeepController(backend, registryOwner)
+	require.NoError(t, err, "no error expected from creating a feed lookup controller")
+	commit()
 
-			_, err = linkToken.Transfer(linkOwner, upkeepOwner.From, big.NewInt(0).Mul(oneHunEth, big.NewInt(int64(upkeepCount+1))))
-			require.NoError(t, err)
+	// deploy multiple upkeeps that listen to a log emitter and need to be
+	// performed for each log event
+	checkResultsProvider := func(i int) bool {
+		return i%2 == 1
+	}
+	require.NoError(t, feeds.DeployUpkeeps(t, backend, upkeepOwner, upkeepCount, checkResultsProvider))
+	require.NoError(t, feeds.RegisterAndFund(t, registry, registryOwner, backend, linkToken))
+	require.NoError(t, feeds.EnableMercury(t, backend, commit, registry, registryOwner))
+	require.NoError(t, feeds.VerifyEnv(t, registry, registryOwner))
 
-			backend.Commit()
-
-			feeds, err := newFeedLookupUpkeepController(backend, registryOwner)
-			require.NoError(t, err, "no error expected from creating a feed lookup controller")
-
-			// deploy multiple upkeeps that listen to a log emitter and need to be
-			// performed for each log event
-			checkResultsProvider := func(i int) bool {
-				return i%2 == 1
-			}
-			require.NoError(t, feeds.DeployUpkeeps(t, backend, upkeepOwner, upkeepCount, checkResultsProvider))
-			require.NoError(t, feeds.RegisterAndFund(t, registry, registryOwner, backend, linkToken))
-			require.NoError(t, feeds.EnableMercury(t, backend, registry, registryOwner))
-			require.NoError(t, feeds.VerifyEnv(t, backend, registry, registryOwner))
-
-			startBlock := backend.Blockchain().CurrentBlock().Number.Int64()
-			// start emitting events in a separate go-routine
-			// feed lookup relies on a single contract event log to perform multiple
-			// listener contracts
-			go func() {
-				// only 1 event is necessary to make all 10 upkeeps eligible
-				_ = feeds.EmitEvents(t, backend, 1, func() {
-					// pause per emit for expected block production time
-					time.Sleep(3 * time.Second)
-				})
-			}()
-
-			go makeDummyBlocks(t, backend, 3*time.Second, 1000)
-
-			idsToCheck := make([]*big.Int, 0)
-			for i, uid := range feeds.UpkeepsIds() {
-				if checkResultsProvider(i) {
-					idsToCheck = append(idsToCheck, uid)
-				}
-			}
-
-			listener, done := listenPerformed(t, backend, registry, idsToCheck, startBlock)
-			defer done()
-			g.Eventually(listener, testutils.WaitTimeout(t)-(5*time.Second), cltest.DBPollingInterval).Should(gomega.BeTrue())
+	h, err := backend.Client().HeaderByNumber(testutils.Context(t), nil)
+	require.NoError(t, err)
+	startBlock := h.Number.Int64()
+	// start emitting events in a separate go-routine
+	// feed lookup relies on a single contract event log to perform multiple
+	// listener contracts
+	go func() {
+		// only 1 event is necessary to make all 10 upkeeps eligible
+		_ = feeds.EmitEvents(t, backend, 1, func() {
+			// pause per emit for expected block production time
+			time.Sleep(3 * time.Second)
 		})
+	}()
+
+	idsToCheck := make([]*big.Int, 0)
+	for i, uid := range feeds.UpkeepsIds() {
+		if checkResultsProvider(i) {
+			idsToCheck = append(idsToCheck, uid)
+		}
 	}
+
+	listener, done := listenPerformed(t, backend, registry, idsToCheck, startBlock)
+	defer done()
+	g.Eventually(listener, testutils.WaitTimeout(t)-(5*time.Second), cltest.DBPollingInterval).Should(gomega.BeTrue())
 }
 
 func startMercuryServer(t *testing.T, mercuryServer *mercury.SimulatedMercuryServer, responder func(i int) (int, []byte)) {
@@ -554,18 +526,6 @@ func startMercuryServer(t *testing.T, mercuryServer *mercury.SimulatedMercurySer
 			_, _ = w.Write(body)
 		}
 	})
-}
-
-func makeDummyBlocks(t *testing.T, backend *backends.SimulatedBackend, interval time.Duration, count int) {
-	go func() {
-		ctx, cancel := context.WithCancel(testutils.Context(t))
-		defer cancel()
-
-		for i := 0; i < count && ctx.Err() == nil; i++ {
-			backend.Commit()
-			time.Sleep(interval)
-		}
-	}()
 }
 
 func emitEvents(ctx context.Context, t *testing.T, n int, contracts []*log_upkeep_counter_wrapper.LogUpkeepCounter, carrol *bind.TransactOpts, afterEmit func()) {
@@ -590,14 +550,16 @@ func mapListener(m *sync.Map, n int) func() bool {
 	}
 }
 
-func listenPerformedN(t *testing.T, backend *backends.SimulatedBackend, registry *iregistry21.IKeeperRegistryMaster, ids []*big.Int, startBlock int64, count int) (func() bool, func()) {
+func listenPerformedN(t *testing.T, backend evmtypes.Backend, registry *iregistry21.IKeeperRegistryMaster, ids []*big.Int, startBlock int64, count int) (func() bool, func()) {
 	cache := &sync.Map{}
 	ctx, cancel := context.WithCancel(testutils.Context(t))
 	start := startBlock
 
 	go func() {
 		for ctx.Err() == nil {
-			currentBlock := backend.Blockchain().CurrentBlock().Number.Uint64()
+			h, err := backend.Client().HeaderByNumber(testutils.Context(t), nil)
+			assert.NoError(t, err)
+			currentBlock := h.Number.Uint64()
 
 			success := make([]bool, len(ids))
 			for i := range success {
@@ -620,7 +582,7 @@ func listenPerformedN(t *testing.T, backend *backends.SimulatedBackend, registry
 				if iter.Event != nil {
 					t.Logf("[automation-ocr3 | EvmRegistry] upkeep performed event emitted for id %s", iter.Event.Id.String())
 
-					//cache.Store(iter.Event.Id.String(), true)
+					// cache.Store(iter.Event.Id.String(), true)
 					count, ok := cache.Load(iter.Event.Id.String())
 					if !ok {
 						cache.Store(iter.Event.Id.String(), 1)
@@ -640,11 +602,11 @@ func listenPerformedN(t *testing.T, backend *backends.SimulatedBackend, registry
 	return mapListener(cache, count), cancel
 }
 
-func listenPerformed(t *testing.T, backend *backends.SimulatedBackend, registry *iregistry21.IKeeperRegistryMaster, ids []*big.Int, startBlock int64) (func() bool, func()) {
+func listenPerformed(t *testing.T, backend evmtypes.Backend, registry *iregistry21.IKeeperRegistryMaster, ids []*big.Int, startBlock int64) (func() bool, func()) {
 	return listenPerformedN(t, backend, registry, ids, startBlock, 0)
 }
 
-func setupNodes(t *testing.T, nodeKeys [5]ethkey.KeyV2, registry *iregistry21.IKeeperRegistryMaster, backend *backends.SimulatedBackend, usr *bind.TransactOpts, useBufferV1 bool) ([]Node, *mercury.SimulatedMercuryServer) {
+func setupNodes(t *testing.T, nodeKeys [5]ethkey.KeyV2, registry *iregistry21.IKeeperRegistryMaster, backend evmtypes.Backend, usr *bind.TransactOpts) ([]Node, *mercury.SimulatedMercuryServer) {
 	lggr := logger.TestLogger(t)
 	mServer := mercury.NewSimulatedMercuryServer()
 	mServer.Start()
@@ -655,6 +617,17 @@ func setupNodes(t *testing.T, nodeKeys [5]ethkey.KeyV2, registry *iregistry21.IK
 	bootstrapNode := Node{
 		appBootstrap, bootstrapTransmitter, bootstrapKb,
 	}
+
+	// Commit blocks to finality depth to ensure LogPoller has finalized blocks to read from
+	cs, err := bootstrapNode.App.GetRelayers().LegacyEVMChains().Get(testutils.SimulatedChainID.String())
+	require.NoError(t, err)
+	ch, ok := cs.(legacyevm.Chain)
+	require.True(t, ok)
+	finalityDepth := ch.Config().EVM().FinalityDepth()
+	for i := 0; i < int(finalityDepth); i++ {
+		backend.Commit()
+	}
+
 	var (
 		oracles []confighelper.OracleIdentityExtra
 		nodes   []Node
@@ -718,8 +691,7 @@ func setupNodes(t *testing.T, nodeKeys [5]ethkey.KeyV2, registry *iregistry21.IK
 		cacheEvictionInterval = "1s"
 		mercuryCredentialName = "%s"
 		contractVersion = "v2.1"
-		useBufferV1 = %v 
-		`, i, registry.Address(), node.KeyBundle.ID(), node.Transmitter, fmt.Sprintf("%s@127.0.0.1:%d", bootstrapPeerID, bootstrapNodePort), MercuryCredName, useBufferV1))
+		`, i, registry.Address(), node.KeyBundle.ID(), node.Transmitter, fmt.Sprintf("%s@127.0.0.1:%d", bootstrapPeerID, bootstrapNodePort), MercuryCredName))
 	}
 
 	// Setup config on contract
@@ -763,6 +735,7 @@ func setupNodes(t *testing.T, nodeKeys [5]ethkey.KeyV2, registry *iregistry21.IK
 		[]int{1, 1, 1, 1},     // s []int,
 		oracles,               // oracles []OracleIdentityExtra,
 		rawCfg,                // reportingPluginConfig []byte,
+		nil,
 		20*time.Millisecond,   // maxDurationQuery time.Duration,
 		1600*time.Millisecond, // maxDurationObservation time.Duration,
 		20*time.Millisecond,   // maxDurationShouldAcceptFinalizedReport time.Duration,
@@ -800,7 +773,7 @@ func setupNodes(t *testing.T, nodeKeys [5]ethkey.KeyV2, registry *iregistry21.IK
 	return nodes, mServer
 }
 
-func deployUpkeeps(t *testing.T, backend *backends.SimulatedBackend, carrol, steve *bind.TransactOpts, linkToken *link_token_interface.LinkToken, registry *iregistry21.IKeeperRegistryMaster, n int) ([]*big.Int, []common.Address, []*log_upkeep_counter_wrapper.LogUpkeepCounter) {
+func deployUpkeeps(t *testing.T, backend evmtypes.Backend, carrol, steve *bind.TransactOpts, linkToken *link_token_interface.LinkToken, registry *iregistry21.IKeeperRegistryMaster, n int) ([]*big.Int, []common.Address, []*log_upkeep_counter_wrapper.LogUpkeepCounter) {
 	ids := make([]*big.Int, n)
 	addrs := make([]common.Address, n)
 	contracts := make([]*log_upkeep_counter_wrapper.LogUpkeepCounter, n)
@@ -808,16 +781,18 @@ func deployUpkeeps(t *testing.T, backend *backends.SimulatedBackend, carrol, ste
 		backend.Commit()
 		time.Sleep(1 * time.Second)
 		upkeepAddr, _, upkeepContract, err := log_upkeep_counter_wrapper.DeployLogUpkeepCounter(
-			carrol, backend,
+			carrol, backend.Client(),
 			big.NewInt(100000),
 		)
 		require.NoError(t, err)
+		backend.Commit()
 
 		upkeepID := registerUpkeep(t, registry, upkeepAddr, carrol, steve, backend)
 
 		// Fund the upkeep
 		_, err = linkToken.Approve(carrol, registry.Address(), oneHunEth)
 		require.NoError(t, err)
+		backend.Commit()
 		_, err = registry.AddFunds(carrol, upkeepID, oneHunEth)
 		require.NoError(t, err)
 		backend.Commit()
@@ -829,7 +804,7 @@ func deployUpkeeps(t *testing.T, backend *backends.SimulatedBackend, carrol, ste
 	return ids, addrs, contracts
 }
 
-func registerUpkeep(t *testing.T, registry *iregistry21.IKeeperRegistryMaster, upkeepAddr common.Address, carrol, steve *bind.TransactOpts, backend *backends.SimulatedBackend) *big.Int {
+func registerUpkeep(t *testing.T, registry *iregistry21.IKeeperRegistryMaster, upkeepAddr common.Address, carrol, steve *bind.TransactOpts, backend evmtypes.Backend) *big.Int {
 	logTriggerConfigType := abi.MustNewType("tuple(address contractAddress, uint8 filterSelector, bytes32 topic0, bytes32 topic1, bytes32 topic2, bytes32 topic3)")
 	logTriggerConfig, err := abi.Encode(map[string]interface{}{
 		"contractAddress": upkeepAddr,
@@ -844,7 +819,7 @@ func registerUpkeep(t *testing.T, registry *iregistry21.IKeeperRegistryMaster, u
 	registrationTx, err := registry.RegisterUpkeep(steve, upkeepAddr, 2_500_000, carrol.From, 1, []byte{}, logTriggerConfig, []byte{})
 	require.NoError(t, err)
 	backend.Commit()
-	upkeepID := getUpkeepIdFromTx21(t, registry, registrationTx, backend)
+	upkeepID := getUpkeepIDFromTx21(t, registry, registrationTx, backend)
 
 	return upkeepID
 }
@@ -852,16 +827,16 @@ func registerUpkeep(t *testing.T, registry *iregistry21.IKeeperRegistryMaster, u
 func deployKeeper21Registry(
 	t *testing.T,
 	auth *bind.TransactOpts,
-	backend *backends.SimulatedBackend,
+	backend evmtypes.Backend,
 	linkAddr, linkFeedAddr,
 	gasFeedAddr common.Address,
 ) *iregistry21.IKeeperRegistryMaster {
-	automationForwarderLogicAddr, _, _, err := automationForwarderLogic.DeployAutomationForwarderLogic(auth, backend)
+	automationForwarderLogicAddr, _, _, err := automationForwarderLogic.DeployAutomationForwarderLogic(auth, backend.Client())
 	require.NoError(t, err)
 	backend.Commit()
 	registryLogicBAddr, _, _, err := registrylogicb21.DeployKeeperRegistryLogicB(
 		auth,
-		backend,
+		backend.Client(),
 		0, // Payment model
 		linkAddr,
 		linkFeedAddr,
@@ -873,7 +848,7 @@ func deployKeeper21Registry(
 
 	registryLogicAAddr, _, _, err := registrylogica21.DeployKeeperRegistryLogicA(
 		auth,
-		backend,
+		backend.Client(),
 		registryLogicBAddr,
 	)
 	require.NoError(t, err)
@@ -881,20 +856,20 @@ func deployKeeper21Registry(
 
 	registryAddr, _, _, err := registry21.DeployKeeperRegistry(
 		auth,
-		backend,
+		backend.Client(),
 		registryLogicAAddr,
 	)
 	require.NoError(t, err)
 	backend.Commit()
 
-	registryMaster, err := iregistry21.NewIKeeperRegistryMaster(registryAddr, backend)
+	registryMaster, err := iregistry21.NewIKeeperRegistryMaster(registryAddr, backend.Client())
 	require.NoError(t, err)
 
 	return registryMaster
 }
 
-func getUpkeepIdFromTx21(t *testing.T, registry *iregistry21.IKeeperRegistryMaster, registrationTx *gethtypes.Transaction, backend *backends.SimulatedBackend) *big.Int {
-	receipt, err := backend.TransactionReceipt(testutils.Context(t), registrationTx.Hash())
+func getUpkeepIDFromTx21(t *testing.T, registry *iregistry21.IKeeperRegistryMaster, registrationTx *gethtypes.Transaction, backend evmtypes.Backend) *big.Int {
+	receipt, err := backend.Client().TransactionReceipt(testutils.Context(t), registrationTx.Hash())
 	require.NoError(t, err)
 	parsedLog, err := registry.ParseUpkeepRegistered(*receipt.Logs[0])
 	require.NoError(t, err)
@@ -907,7 +882,7 @@ type registerAndFundFunc func(*testing.T, common.Address, *bind.TransactOpts, ui
 func registerAndFund(
 	registry *iregistry21.IKeeperRegistryMaster,
 	registryOwner *bind.TransactOpts,
-	backend *backends.SimulatedBackend,
+	backend evmtypes.Backend,
 	linkToken *link_token_interface.LinkToken,
 ) registerAndFundFunc {
 	return func(t *testing.T, upkeepAddr common.Address, upkeepOwner *bind.TransactOpts, trigger uint8, config []byte) *big.Int {
@@ -926,7 +901,7 @@ func registerAndFund(
 
 		backend.Commit()
 
-		receipt, err := backend.TransactionReceipt(testutils.Context(t), registrationTx.Hash())
+		receipt, err := backend.Client().TransactionReceipt(testutils.Context(t), registrationTx.Hash())
 		require.NoError(t, err)
 
 		parsedLog, err := registry.ParseUpkeepRegistered(*receipt.Logs[0])
@@ -937,6 +912,7 @@ func registerAndFund(
 		// Fund the upkeep
 		_, err = linkToken.Approve(upkeepOwner, registry.Address(), oneHunEth)
 		require.NoError(t, err)
+		backend.Commit()
 
 		_, err = registry.AddFunds(upkeepOwner, upkeepID, oneHunEth)
 		require.NoError(t, err)
@@ -962,15 +938,13 @@ type feedLookupUpkeepController struct {
 }
 
 func newFeedLookupUpkeepController(
-	backend *backends.SimulatedBackend,
+	backend evmtypes.Backend,
 	protocolOwner *bind.TransactOpts,
 ) (*feedLookupUpkeepController, error) {
-	addr, _, contract, err := dummy_protocol_wrapper.DeployDummyProtocol(protocolOwner, backend)
+	addr, _, contract, err := dummy_protocol_wrapper.DeployDummyProtocol(protocolOwner, backend.Client())
 	if err != nil {
 		return nil, err
 	}
-
-	backend.Commit()
 
 	return &feedLookupUpkeepController{
 		logSrcAddr:    addr,
@@ -981,7 +955,7 @@ func newFeedLookupUpkeepController(
 
 func (c *feedLookupUpkeepController) DeployUpkeeps(
 	t *testing.T,
-	backend *backends.SimulatedBackend,
+	backend evmtypes.Backend,
 	owner *bind.TransactOpts,
 	count int,
 	checkErrResultsProvider func(i int) bool,
@@ -997,7 +971,7 @@ func (c *feedLookupUpkeepController) DeployUpkeeps(
 		}
 		addr, _, contract, err := log_triggered_streams_lookup_wrapper.DeployLogTriggeredStreamsLookup(
 			owner,
-			backend,
+			backend.Client(),
 			false,
 			false,
 			checkErrResult,
@@ -1027,7 +1001,7 @@ func (c *feedLookupUpkeepController) RegisterAndFund(
 	t *testing.T,
 	registry *iregistry21.IKeeperRegistryMaster,
 	registryOwner *bind.TransactOpts,
-	backend *backends.SimulatedBackend,
+	backend evmtypes.Backend,
 	linkToken *link_token_interface.LinkToken,
 ) error {
 	ids := make([]*big.Int, len(c.contracts))
@@ -1059,7 +1033,8 @@ func (c *feedLookupUpkeepController) RegisterAndFund(
 
 func (c *feedLookupUpkeepController) EnableMercury(
 	t *testing.T,
-	backend *backends.SimulatedBackend,
+	backend evmtypes.Backend,
+	commit func() common.Hash,
 	registry *iregistry21.IKeeperRegistryMaster,
 	registryOwner *bind.TransactOpts,
 ) error {
@@ -1074,6 +1049,7 @@ func (c *feedLookupUpkeepController) EnableMercury(
 
 			return err
 		}
+		commit()
 
 		callOpts := &bind.CallOpts{
 			Pending: true,
@@ -1098,7 +1074,7 @@ func (c *feedLookupUpkeepController) EnableMercury(
 		require.True(t, checkBytes.MercuryEnabled)
 	}
 
-	bl, _ := backend.BlockByHash(testutils.Context(t), backend.Commit())
+	bl, _ := backend.Client().BlockByHash(testutils.Context(t), backend.Commit())
 	t.Logf("block number after mercury enabled: %d", bl.NumberU64())
 
 	return nil
@@ -1106,7 +1082,6 @@ func (c *feedLookupUpkeepController) EnableMercury(
 
 func (c *feedLookupUpkeepController) VerifyEnv(
 	t *testing.T,
-	backend *backends.SimulatedBackend,
 	registry *iregistry21.IKeeperRegistryMaster,
 	registryOwner *bind.TransactOpts,
 ) error {
@@ -1150,13 +1125,14 @@ func (c *feedLookupUpkeepController) VerifyEnv(
 
 func (c *feedLookupUpkeepController) EmitEvents(
 	t *testing.T,
-	backend *backends.SimulatedBackend,
+	backend evmtypes.Backend,
 	count int,
 	afterEmit func(),
 ) error {
 	ctx := testutils.Context(t)
 
 	for i := 0; i < count && ctx.Err() == nil; i++ {
+		blockBeforeOrder, _ := backend.Client().BlockByHash(ctx, backend.Commit())
 		_, err := c.protocol.ExecuteLimitOrder(c.protocolOwner, big.NewInt(1000), big.NewInt(10000), c.logSrcAddr)
 		require.NoError(t, err, "no error expected from limit order exec")
 
@@ -1167,13 +1143,13 @@ func (c *feedLookupUpkeepController) EmitEvents(
 		backend.Commit()
 
 		// verify event was emitted
-		block, _ := backend.BlockByHash(ctx, backend.Commit())
+		block, _ := backend.Client().BlockByHash(ctx, backend.Commit())
 		t.Logf("block number after emit event: %d", block.NumberU64())
 
 		iter, _ := c.protocol.FilterLimitOrderExecuted(
 			&bind.FilterOpts{
 				Context: testutils.Context(t),
-				Start:   block.NumberU64() - 1,
+				Start:   blockBeforeOrder.NumberU64() - 1,
 			},
 			[]*big.Int{big.NewInt(1000)},
 			[]*big.Int{big.NewInt(10000)},
@@ -1189,7 +1165,7 @@ func (c *feedLookupUpkeepController) EmitEvents(
 
 		require.True(t, eventEmitted, "event expected on backend")
 		if !eventEmitted {
-			return fmt.Errorf("event was not emitted")
+			return errors.New("event was not emitted")
 		}
 
 		afterEmit()

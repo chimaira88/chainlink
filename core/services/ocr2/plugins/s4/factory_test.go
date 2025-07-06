@@ -42,7 +42,7 @@ func TestS4ReportingPluginFactory_NewReportingPlugin(t *testing.T) {
 	rpConfig := types.ReportingPluginConfig{
 		OffchainConfig: make([]byte, 100),
 	}
-	plugin, pluginInfo, err := f.NewReportingPlugin(rpConfig)
+	plugin, pluginInfo, err := f.NewReportingPlugin(t.Context(), rpConfig)
 	require.NoError(t, err)
 	require.NotNil(t, plugin)
 	require.Equal(t, types.ReportingPluginInfo{
@@ -67,7 +67,7 @@ func TestS4ReportingPluginFactory_NewReportingPlugin(t *testing.T) {
 		rpConfig := types.ReportingPluginConfig{
 			OffchainConfig: make([]byte, 100),
 		}
-		plugin, _, err := f.NewReportingPlugin(rpConfig)
+		plugin, _, err := f.NewReportingPlugin(t.Context(), rpConfig)
 		require.ErrorContains(t, err, "some error")
 		require.Nil(t, plugin)
 	})

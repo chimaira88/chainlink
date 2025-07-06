@@ -2,24 +2,22 @@ package ocr
 
 import (
 	"context"
-	"fmt"
+	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/rs/zerolog"
-
-	"github.com/smartcontractkit/seth"
-
-	"github.com/smartcontractkit/wasp"
 	"go.uber.org/ratelimit"
 
-	client2 "github.com/smartcontractkit/chainlink-testing-framework/client"
+	client2 "github.com/smartcontractkit/chainlink-testing-framework/lib/client"
+	"github.com/smartcontractkit/chainlink-testing-framework/seth"
+	"github.com/smartcontractkit/chainlink-testing-framework/wasp"
 
+	"github.com/smartcontractkit/chainlink/deployment/environment/nodeclient"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
-	actions_seth "github.com/smartcontractkit/chainlink/integration-tests/actions/seth"
-	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
+	"github.com/smartcontractkit/chainlink/integration-tests/testconfig/ocr"
 )
 
 // VU is a virtual user for the OCR load test
@@ -32,22 +30,24 @@ type VU struct {
 	roundNum      atomic.Int64
 	seth          *seth.Client
 	lta           common.Address
-	bootstrapNode *client.ChainlinkK8sClient
-	workerNodes   []*client.ChainlinkK8sClient
-	msClient      *client2.MockserverClient
+	bootstrapNode *nodeclient.ChainlinkK8sClient
+	workerNodes   []*nodeclient.ChainlinkK8sClient
+	msClient      *client2.MockserverClient //nolint:staticcheck //SA1019 no need to upgrade
 	l             zerolog.Logger
 	ocrInstances  []contracts.OffchainAggregator
+	config        ocr.OffChainAggregatorsConfig
 }
 
 func NewVU(
 	l zerolog.Logger,
 	seth *seth.Client,
+	config ocr.OffChainAggregatorsConfig,
 	rate int,
 	rateUnit time.Duration,
 	lta common.Address,
-	bootstrapNode *client.ChainlinkK8sClient,
-	workerNodes []*client.ChainlinkK8sClient,
-	msClient *client2.MockserverClient,
+	bootstrapNode *nodeclient.ChainlinkK8sClient,
+	workerNodes []*nodeclient.ChainlinkK8sClient,
+	msClient *client2.MockserverClient, //nolint:staticcheck //SA1019 no need to upgrade
 ) *VU {
 	return &VU{
 		VUControl:     wasp.NewVUControl(),
@@ -60,6 +60,7 @@ func NewVU(
 		msClient:      msClient,
 		bootstrapNode: bootstrapNode,
 		workerNodes:   workerNodes,
+		config:        config,
 	}
 }
 
@@ -75,15 +76,16 @@ func (m *VU) Clone(_ *wasp.Generator) wasp.VirtualUser {
 		msClient:      m.msClient,
 		bootstrapNode: m.bootstrapNode,
 		workerNodes:   m.workerNodes,
+		config:        m.config,
 	}
 }
 
 func (m *VU) Setup(_ *wasp.Generator) error {
-	ocrInstances, err := actions_seth.DeployOCRv1Contracts(m.l, m.seth, 1, m.lta, contracts.ChainlinkK8sClientToChainlinkNodeWithKeysAndAddress(m.workerNodes))
+	ocrInstances, err := actions.SetupOCRv1Contracts(m.l, m.seth, m.config, m.lta, contracts.ChainlinkK8sClientToChainlinkNodeWithKeysAndAddress(m.workerNodes))
 	if err != nil {
 		return err
 	}
-	err = actions.CreateOCRJobs(ocrInstances, m.bootstrapNode, m.workerNodes, 5, m.msClient, fmt.Sprint(m.seth.ChainID))
+	err = actions.CreateOCRJobs(ocrInstances, m.bootstrapNode, m.workerNodes, 5, m.msClient, strconv.FormatInt(m.seth.ChainID, 10))
 	if err != nil {
 		return err
 	}

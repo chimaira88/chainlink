@@ -14,15 +14,15 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/slack-go/slack"
 
-	"github.com/smartcontractkit/chainlink-testing-framework/testreporters"
-	"github.com/smartcontractkit/chainlink/integration-tests/client"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/testreporters"
+	"github.com/smartcontractkit/chainlink/deployment/environment/nodeclient"
 )
 
 // KeeperBenchmarkTestReporter enables reporting on the keeper benchmark test
 type KeeperBenchmarkTestReporter struct {
 	Reports                        []KeeperBenchmarkTestReport `json:"reports"`
 	ReportMutex                    sync.Mutex
-	AttemptedChainlinkTransactions []*client.TransactionsData `json:"attemptedChainlinkTransactions"`
+	AttemptedChainlinkTransactions []*nodeclient.TransactionsData `json:"attemptedChainlinkTransactions"`
 	NumRevertedUpkeeps             int64
 	NumStaleUpkeepReports          int64
 	Summary                        KeeperBenchmarkTestSummary `json:"summary"`
@@ -129,7 +129,7 @@ func (k *KeeperBenchmarkTestReporter) WriteReport(folderLocation string) error {
 	if err != nil {
 		return err
 	}
-	avg, median, ninetyPct, ninetyNinePct, max := IntListStats(allDelays)
+	avg, median, ninetyPct, ninetyNinePct, maxVal := IntListStats(allDelays)
 	err = keeperReportWriter.Write([]string{
 		fmt.Sprint(totalEligibleCount),
 		fmt.Sprint(totalPerformed),
@@ -139,7 +139,7 @@ func (k *KeeperBenchmarkTestReporter) WriteReport(folderLocation string) error {
 		fmt.Sprint(median),
 		fmt.Sprint(ninetyPct),
 		fmt.Sprint(ninetyNinePct),
-		fmt.Sprint(max),
+		fmt.Sprint(maxVal),
 		fmt.Sprintf("%.2f%%", pctWithinSLA),
 		fmt.Sprintf("%.2f%%", pctReverted),
 		fmt.Sprintf("%.2f%%", pctStale),
@@ -156,7 +156,7 @@ func (k *KeeperBenchmarkTestReporter) WriteReport(folderLocation string) error {
 		Int64("Median Perform Delay", median).
 		Int64("90th pct Perform Delay", ninetyPct).
 		Int64("99th pct Perform Delay", ninetyNinePct).
-		Int64("Max Perform Delay", max).
+		Int64("Max Perform Delay", maxVal).
 		Float64("Percent Within SLA", pctWithinSLA).
 		Float64("Percent Reverted", pctReverted).
 		Msg("Calculated Aggregate Results")
@@ -179,7 +179,7 @@ func (k *KeeperBenchmarkTestReporter) WriteReport(folderLocation string) error {
 	}
 
 	for contractIndex, report := range k.Reports {
-		avg, median, ninetyPct, ninetyNinePct, max = IntListStats(report.AllCheckDelays)
+		avg, median, ninetyPct, ninetyNinePct, maxVal = IntListStats(report.AllCheckDelays)
 		err = keeperReportWriter.Write([]string{
 			fmt.Sprint(contractIndex),
 			report.RegistryAddress,
@@ -190,7 +190,7 @@ func (k *KeeperBenchmarkTestReporter) WriteReport(folderLocation string) error {
 			fmt.Sprint(median),
 			fmt.Sprint(ninetyPct),
 			fmt.Sprint(ninetyNinePct),
-			fmt.Sprint(max),
+			fmt.Sprint(maxVal),
 			fmt.Sprintf("%.2f%%", (1.0-float64(report.TotalSLAMissedUpkeeps)/float64(report.TotalEligibleCount))*100),
 		})
 		if err != nil {
@@ -215,7 +215,7 @@ func (k *KeeperBenchmarkTestReporter) WriteReport(folderLocation string) error {
 		"median": median,
 		"90p":    ninetyPct,
 		"99p":    ninetyNinePct,
-		"max":    max,
+		"max":    maxVal,
 	}
 	k.Summary.Metrics.PercentWithinSLA = pctWithinSLA
 	k.Summary.Metrics.PercentRevert = pctReverted
@@ -223,8 +223,9 @@ func (k *KeeperBenchmarkTestReporter) WriteReport(folderLocation string) error {
 	k.Summary.Metrics.TotalTimesPerformed = totalPerformed
 	k.Summary.Metrics.TotalStaleReports = totalStaleReports
 	k.Summary.Metrics.PercentStale = pctStale
-	k.Summary.Metrics.AverageActualPerformsPerBlock = float64(totalPerformed) / float64(k.Summary.TestInputs["BlockRange"].(int64))
-
+	if k.Summary.TestInputs["BlockRange"] != nil {
+		k.Summary.Metrics.AverageActualPerformsPerBlock = float64(totalPerformed) / float64(k.Summary.TestInputs["BlockRange"].(int64))
+	}
 	// TODO: Set test expectations
 	/* Expect(int64(pctWithinSLA)).Should(BeNumerically(">=", int64(80)), "Expected PercentWithinSLA to be greater than or equal to 80, but got %f", pctWithinSLA)
 	Expect(int64(pctReverted)).Should(BeNumerically("<=", int64(10)), "Expected PercentRevert to be less than or equal to 10, but got %f", pctReverted)
@@ -273,39 +274,36 @@ func (k *KeeperBenchmarkTestReporter) SendSlackNotification(t *testing.T, slackC
 		return err
 	}
 
-	formattedDashboardUrl := fmt.Sprintf("%s%s?from=%d&to=%d&var-namespace=%s&var-cl_node=chainlink-0-0", grafanaUrl, dashboardUrl, k.Summary.StartTime, k.Summary.EndTime, k.namespace)
-	log.Info().Str("Dashboard", formattedDashboardUrl).Msg("Dashboard URL")
+	formattedDashboardURL := fmt.Sprintf("%s%s?from=%d&to=%d&var-namespace=%s&var-cl_node=chainlink-0-0", grafanaUrl, dashboardUrl, k.Summary.StartTime, k.Summary.EndTime, k.namespace)
+	log.Info().Str("Dashboard", formattedDashboardURL).Msg("Dashboard URL")
 
-	if err := testreporters.UploadSlackFile(slackClient, slack.FileUploadParameters{
+	if err := testreporters.UploadSlackFile(slackClient, slack.UploadFileV2Parameters{
 		Title:           fmt.Sprintf("Automation Benchmark Test Summary %s", k.namespace),
-		Filetype:        "json",
 		Filename:        fmt.Sprintf("automation_benchmark_summary_%s.json", k.namespace),
 		File:            k.keeperSummaryFile,
-		InitialComment:  fmt.Sprintf("Automation Benchmark Test Summary %s.\n<%s|Test Dashboard> ", k.namespace, formattedDashboardUrl),
-		Channels:        []string{testreporters.SlackChannel},
+		InitialComment:  fmt.Sprintf("Automation Benchmark Test Summary %s.\n<%s|Test Dashboard> ", k.namespace, formattedDashboardURL),
+		Channel:         testreporters.SlackChannel,
 		ThreadTimestamp: ts,
 	}); err != nil {
 		return err
 	}
 
-	if err := testreporters.UploadSlackFile(slackClient, slack.FileUploadParameters{
+	if err := testreporters.UploadSlackFile(slackClient, slack.UploadFileV2Parameters{
 		Title:           fmt.Sprintf("Automation Benchmark Test Report %s", k.namespace),
-		Filetype:        "csv",
 		Filename:        fmt.Sprintf("automation_benchmark_report_%s.csv", k.namespace),
 		File:            k.keeperReportFile,
 		InitialComment:  fmt.Sprintf("Automation Benchmark Test Report %s", k.namespace),
-		Channels:        []string{testreporters.SlackChannel},
+		Channel:         testreporters.SlackChannel,
 		ThreadTimestamp: ts,
 	}); err != nil {
 		return err
 	}
-	return testreporters.UploadSlackFile(slackClient, slack.FileUploadParameters{
+	return testreporters.UploadSlackFile(slackClient, slack.UploadFileV2Parameters{
 		Title:           fmt.Sprintf("Automation Benchmark Attempted Chainlink Txs %s", k.namespace),
-		Filetype:        "json",
 		Filename:        fmt.Sprintf("attempted_cl_txs_%s.json", k.namespace),
 		File:            k.attemptedTransactionsFile,
 		InitialComment:  fmt.Sprintf("Automation Benchmark Attempted Txs %s", k.namespace),
-		Channels:        []string{testreporters.SlackChannel},
+		Channel:         testreporters.SlackChannel,
 		ThreadTimestamp: ts,
 	})
 }

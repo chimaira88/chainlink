@@ -16,25 +16,25 @@ import (
 	"github.com/urfave/cli"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/config"
-	"github.com/smartcontractkit/chainlink-solana/pkg/solana"
-	solanaClient "github.com/smartcontractkit/chainlink-solana/pkg/solana/client"
 	solcfg "github.com/smartcontractkit/chainlink-solana/pkg/solana/config"
+	solanatesting "github.com/smartcontractkit/chainlink-solana/pkg/solana/testing"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 
 	"github.com/smartcontractkit/chainlink/v2/core/cmd"
 )
 
+// TODO: move this test to `chainlink-solana` https://smartcontract-it.atlassian.net/browse/NONEVM-790
 func TestShell_SolanaSendSol(t *testing.T) {
 	ctx := testutils.Context(t)
 	chainID := "localnet"
-	url := solanaClient.SetupLocalSolNode(t)
+	url := solanatesting.SetupLocalSolNode(t)
 	node := solcfg.Node{
 		Name: ptr(t.Name()),
 		URL:  config.MustParseURL(url),
 	}
-	cfg := solana.TOMLConfig{
+	cfg := solcfg.TOMLConfig{
 		ChainID: &chainID,
-		Nodes:   solana.SolanaNodes{&node},
+		Nodes:   solcfg.Nodes{&node},
 		Enabled: ptr(true),
 	}
 	app := solanaStartNewApplication(t, &cfg)
@@ -42,7 +42,7 @@ func TestShell_SolanaSendSol(t *testing.T) {
 	require.NoError(t, err)
 	to, err := solanago.NewRandomPrivateKey()
 	require.NoError(t, err)
-	solanaClient.FundTestAccounts(t, []solanago.PublicKey{from.PublicKey()}, url)
+	solanatesting.FundTestAccounts(t, []solanago.PublicKey{from.PublicKey()}, url)
 
 	require.Eventually(t, func() bool {
 		coin, err := balance(from.PublicKey(), url)

@@ -14,11 +14,12 @@ import (
 	ocrConfigHelper "github.com/smartcontractkit/libocr/offchainreporting/confighelper"
 	ocrConfigHelper2 "github.com/smartcontractkit/libocr/offchainreporting2plus/confighelper"
 
-	"github.com/smartcontractkit/chainlink/integration-tests/client"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/flux_aggregator_wrapper"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/functions_billing_registry_events_mock"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/operator_factory"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/llo-feeds/generated/verifier"
+	"github.com/smartcontractkit/chainlink-common/pkg/config"
+
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/flux_aggregator_wrapper"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/llo-feeds/generated/verifier"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/operatorforwarder/generated/operator_factory"
+	"github.com/smartcontractkit/chainlink/deployment/environment/nodeclient"
 )
 
 type FluxAggregatorOptions struct {
@@ -79,7 +80,18 @@ type LinkToken interface {
 	Transfer(to string, amount *big.Int) error
 	BalanceOf(ctx context.Context, addr string) (*big.Int, error)
 	TransferAndCall(to string, amount *big.Int, data []byte) (*types.Transaction, error)
+	TransferAndCallFromKey(to string, amount *big.Int, data []byte, keyNum int) (*types.Transaction, error)
 	Name(context.Context) (string, error)
+	Decimals() uint
+}
+
+type WETHToken interface {
+	Address() string
+	Approve(to string, amount *big.Int) error
+	Transfer(to string, amount *big.Int) error
+	BalanceOf(ctx context.Context, addr string) (*big.Int, error)
+	Name(context.Context) (string, error)
+	Decimals() uint
 }
 
 type OffchainOptions struct {
@@ -113,22 +125,22 @@ type OffChainAggregatorConfig struct {
 }
 
 type OffChainAggregatorV2Config struct {
-	DeltaProgress                           time.Duration
-	DeltaResend                             time.Duration
-	DeltaRound                              time.Duration
-	DeltaGrace                              time.Duration
-	DeltaStage                              time.Duration
-	RMax                                    uint8
-	S                                       []int
-	Oracles                                 []ocrConfigHelper2.OracleIdentityExtra
-	ReportingPluginConfig                   []byte
-	MaxDurationQuery                        time.Duration
-	MaxDurationObservation                  time.Duration
-	MaxDurationReport                       time.Duration
-	MaxDurationShouldAcceptFinalizedReport  time.Duration
-	MaxDurationShouldTransmitAcceptedReport time.Duration
-	F                                       int
-	OnchainConfig                           []byte
+	DeltaProgress                           *config.Duration                       `toml:",omitempty"`
+	DeltaResend                             *config.Duration                       `toml:",omitempty"`
+	DeltaRound                              *config.Duration                       `toml:",omitempty"`
+	DeltaGrace                              *config.Duration                       `toml:",omitempty"`
+	DeltaStage                              *config.Duration                       `toml:",omitempty"`
+	RMax                                    uint8                                  `toml:"-"`
+	S                                       []int                                  `toml:"-"`
+	Oracles                                 []ocrConfigHelper2.OracleIdentityExtra `toml:"-"`
+	ReportingPluginConfig                   []byte                                 `toml:"-"`
+	MaxDurationQuery                        *config.Duration                       `toml:",omitempty"`
+	MaxDurationObservation                  *config.Duration                       `toml:",omitempty"`
+	MaxDurationReport                       *config.Duration                       `toml:",omitempty"`
+	MaxDurationShouldAcceptFinalizedReport  *config.Duration                       `toml:",omitempty"`
+	MaxDurationShouldTransmitAcceptedReport *config.Duration                       `toml:",omitempty"`
+	F                                       int                                    `toml:"-"`
+	OnchainConfig                           []byte                                 `toml:"-"`
 }
 
 type OffchainAggregatorData struct {
@@ -136,15 +148,20 @@ type OffchainAggregatorData struct {
 }
 
 type ChainlinkNodeWithKeysAndAddress interface {
-	MustReadOCRKeys() (*client.OCRKeys, error)
-	MustReadP2PKeys() (*client.P2PKeys, error)
-	ExportEVMKeysForChain(string) ([]*client.ExportedEVMKey, error)
+	MustReadOCRKeys() (*nodeclient.OCRKeys, error)
+	MustReadP2PKeys() (*nodeclient.P2PKeys, error)
 	PrimaryEthAddress() (string, error)
+	EthAddresses() ([]string, error)
+	ChainlinkKeyExporter
+}
+
+type ChainlinkKeyExporter interface {
+	ExportEVMKeysForChain(string) ([]*nodeclient.ExportedEVMKey, error)
 }
 
 type ChainlinkNodeWithForwarder interface {
-	TrackForwarder(chainID *big.Int, address common.Address) (*client.Forwarder, *http.Response, error)
-	GetConfig() client.ChainlinkConfig
+	TrackForwarder(chainID *big.Int, address common.Address) (*nodeclient.Forwarder, *http.Response, error)
+	GetConfig() nodeclient.ChainlinkConfig
 }
 
 type OffChainAggregatorWithRounds interface {
@@ -212,10 +229,23 @@ type JobByInstance struct {
 	Instance string
 }
 
+type MockLINKETHFeed interface {
+	Address() string
+	LatestRoundData() (*big.Int, error)
+	LatestRoundDataUpdatedAt() (*big.Int, error)
+}
+
 type MockETHLINKFeed interface {
 	Address() string
 	LatestRoundData() (*big.Int, error)
 	LatestRoundDataUpdatedAt() (*big.Int, error)
+}
+
+type MockETHUSDFeed interface {
+	Address() string
+	LatestRoundData() (*big.Int, error)
+	LatestRoundDataUpdatedAt() (*big.Int, error)
+	Decimals() uint
 }
 
 type MockGasFeed interface {
@@ -225,6 +255,7 @@ type MockGasFeed interface {
 type BlockHashStore interface {
 	Address() string
 	GetBlockHash(ctx context.Context, blockNumber *big.Int) ([32]byte, error)
+	StoreVerifyHeader(blockNumber *big.Int, blockHeader []byte) error
 }
 
 type Staking interface {
@@ -236,21 +267,6 @@ type Staking interface {
 	RaiseAlert() error
 	Start(amount *big.Int, initialRewardRate *big.Int) error
 	SetMerkleRoot(newMerkleRoot [32]byte) error
-}
-
-type FunctionsOracleEventsMock interface {
-	Address() string
-	OracleResponse(requestId [32]byte) error
-	OracleRequest(requestId [32]byte, requestingContract common.Address, requestInitiator common.Address, subscriptionId uint64, subscriptionOwner common.Address, data []byte) error
-	UserCallbackError(requestId [32]byte, reason string) error
-	UserCallbackRawError(requestId [32]byte, lowLevelData []byte) error
-}
-
-type FunctionsBillingRegistryEventsMock interface {
-	Address() string
-	SubscriptionFunded(subscriptionId uint64, oldBalance *big.Int, newBalance *big.Int) error
-	BillingStart(requestId [32]byte, commitment functions_billing_registry_events_mock.FunctionsBillingRegistryEventsMockCommitment) error
-	BillingEnd(requestId [32]byte, subscriptionId uint64, signerPayment *big.Int, transmitterPayment *big.Int, totalCost *big.Int, success bool) error
 }
 
 type StakingEventsMock interface {
@@ -423,6 +439,10 @@ type LogEmitter interface {
 	EmitLogIntsIndexed(ints []int) (*types.Transaction, error)
 	EmitLogIntMultiIndexed(ints int, ints2 int, count int) (*types.Transaction, error)
 	EmitLogStrings(strings []string) (*types.Transaction, error)
+	EmitLogIntsFromKey(ints []int, keyNum int) (*types.Transaction, error)
+	EmitLogIntsIndexedFromKey(ints []int, keyNum int) (*types.Transaction, error)
+	EmitLogIntMultiIndexedFromKey(ints int, ints2 int, count int, keyNum int) (*types.Transaction, error)
+	EmitLogStringsFromKey(strings []string, keyNum int) (*types.Transaction, error)
 	EmitLogInt(payload int) (*types.Transaction, error)
 	EmitLogIntIndexed(payload int) (*types.Transaction, error)
 	EmitLogString(strings string) (*types.Transaction, error)

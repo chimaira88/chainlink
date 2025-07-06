@@ -9,9 +9,10 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains"
 	"github.com/smartcontractkit/chainlink/v2/core/logger/audit"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay"
 	solanamodels "github.com/smartcontractkit/chainlink/v2/core/store/models/solana"
 	"github.com/smartcontractkit/chainlink/v2/core/web/presenters"
 )
@@ -21,9 +22,11 @@ type SolanaTransfersController struct {
 	App chainlink.Application
 }
 
+var ErrSolanaNotEnabled = errChainDisabled{name: "Solana", tomlKey: "Solana.Enabled"}
+
 // Create sends SOL and other native coins from the Chainlink's account to a specified address.
 func (tc *SolanaTransfersController) Create(c *gin.Context) {
-	relayers := tc.App.GetRelayers().List(chainlink.FilterRelayersByType(types.NetworkSolana))
+	relayers := tc.App.GetRelayers().List(chainlink.FilterRelayersByType(relay.NetworkSolana))
 	if relayers == nil {
 		jsonAPIError(c, http.StatusBadRequest, ErrSolanaNotEnabled)
 		return
@@ -48,7 +51,7 @@ func (tc *SolanaTransfersController) Create(c *gin.Context) {
 	}
 
 	amount := new(big.Int).SetUint64(tr.Amount)
-	relayerID := types.RelayID{Network: types.NetworkSolana, ChainID: tr.SolanaChainID}
+	relayerID := types.RelayID{Network: relay.NetworkSolana, ChainID: tr.SolanaChainID}
 	relayer, err := relayers.Get(relayerID)
 	if err != nil {
 		if errors.Is(err, chainlink.ErrNoSuchRelayer) {
@@ -59,9 +62,9 @@ func (tc *SolanaTransfersController) Create(c *gin.Context) {
 		return
 	}
 
-	err = relayer.Transact(c, tr.From.String(), tr.To.String(), amount, !tr.AllowHigherAmounts)
+	err = relayer.Transact(c.Request.Context(), tr.From.String(), tr.To.String(), amount, !tr.AllowHigherAmounts)
 	if err != nil {
-		if errors.Is(err, chains.ErrNotFound) || errors.Is(err, chains.ErrChainIDEmpty) {
+		if errors.Is(err, chains.ErrNotFound) {
 			jsonAPIError(c, http.StatusBadRequest, err)
 			return
 		}

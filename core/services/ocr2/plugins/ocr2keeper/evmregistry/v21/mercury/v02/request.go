@@ -11,14 +11,14 @@ import (
 	"strconv"
 	"time"
 
-	automationTypes "github.com/smartcontractkit/chainlink-automation/pkg/v3/types"
-
-	"github.com/smartcontractkit/chainlink-common/pkg/services"
-
 	"github.com/avast/retry-go/v4"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/services"
+
+	automationTypes "github.com/smartcontractkit/chainlink-automation/pkg/v3/types"
+
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/encoding"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/mercury"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/prommetrics"
@@ -70,8 +70,7 @@ func (c *client) DoRequest(ctx context.Context, streamsLookup *mercury.StreamsLo
 		})
 	}
 
-	// TODO (AUTO 9090): Understand and fix the use of context.Background() here
-	reqTimeoutCtx, cancel := context.WithTimeout(context.Background(), mercury.RequestTimeout)
+	ctx, cancel := context.WithTimeout(ctx, mercury.RequestTimeout)
 	defer cancel()
 
 	state := encoding.NoPipelineError
@@ -86,7 +85,7 @@ func (c *client) DoRequest(ctx context.Context, streamsLookup *mercury.StreamsLo
 	// if no execution errors, then check if any feed returned an error code, if so use the last error code
 	for i := 0; i < resultLen; i++ {
 		select {
-		case <-reqTimeoutCtx.Done():
+		case <-ctx.Done():
 			// Request Timed out, return timeout error
 			c.lggr.Errorf("at block %s upkeep %s, streams lookup v0.2 timed out", streamsLookup.Time.String(), streamsLookup.UpkeepId.String())
 			return encoding.NoPipelineError, nil, encoding.ErrCodeStreamsTimeout, false, 0 * time.Second, nil
@@ -208,7 +207,7 @@ func (c *client) singleFeedRequest(ctx context.Context, ch chan<- mercury.Mercur
 				return nil
 			}
 
-			prommetrics.AutomationStreamsResponses.WithLabelValues(prommetrics.StreamsVersion02, fmt.Sprintf("%d", httpResponse.StatusCode)).Inc()
+			prommetrics.AutomationStreamsResponses.WithLabelValues(prommetrics.StreamsVersion02, strconv.Itoa(httpResponse.StatusCode)).Inc()
 			switch httpResponse.StatusCode {
 			case http.StatusNotFound, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 				// Considered as pipeline error, but if retry attempts go over threshold, is changed upstream to ErrCode
@@ -268,7 +267,7 @@ func (c *client) singleFeedRequest(ctx context.Context, ch chan<- mercury.Mercur
 		},
 		// only retry when the error is 404 Not Found, 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
 		retry.RetryIf(func(err error) bool {
-			return err.Error() == fmt.Sprintf("%d", http.StatusNotFound) || err.Error() == fmt.Sprintf("%d", http.StatusInternalServerError) || err.Error() == fmt.Sprintf("%d", http.StatusBadGateway) || err.Error() == fmt.Sprintf("%d", http.StatusServiceUnavailable) || err.Error() == fmt.Sprintf("%d", http.StatusGatewayTimeout)
+			return err.Error() == strconv.Itoa(http.StatusNotFound) || err.Error() == strconv.Itoa(http.StatusInternalServerError) || err.Error() == strconv.Itoa(http.StatusBadGateway) || err.Error() == strconv.Itoa(http.StatusServiceUnavailable) || err.Error() == strconv.Itoa(http.StatusGatewayTimeout)
 		}),
 		retry.Context(ctx),
 		retry.Delay(retryDelay),

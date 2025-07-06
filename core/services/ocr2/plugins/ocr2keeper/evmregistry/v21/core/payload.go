@@ -2,7 +2,7 @@ package core
 
 import (
 	"encoding/hex"
-	"fmt"
+	"errors"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	ErrInvalidUpkeepID = fmt.Errorf("invalid upkeepID")
+	ErrInvalidUpkeepID = errors.New("invalid upkeepID")
 )
 
 func UpkeepWorkID(uid ocr2keepers.UpkeepIdentifier, trigger ocr2keepers.Trigger) string {
@@ -20,7 +20,7 @@ func UpkeepWorkID(uid ocr2keepers.UpkeepIdentifier, trigger ocr2keepers.Trigger)
 		triggerExtBytes = trigger.LogTriggerExtension.LogIdentifier()
 	}
 	hash := crypto.Keccak256(append(uid[:], triggerExtBytes...))
-	return hex.EncodeToString(hash[:])
+	return hex.EncodeToString(hash)
 }
 
 func NewUpkeepPayload(id *big.Int, trigger ocr2keepers.Trigger, checkData []byte) (ocr2keepers.UpkeepPayload, error) {

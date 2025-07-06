@@ -14,25 +14,24 @@ import (
 	"os"
 	"strconv"
 
-	types2 "github.com/smartcontractkit/chainlink-common/pkg/types"
-
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	gethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 
+	commontypes "github.com/smartcontractkit/chainlink-common/pkg/types"
 	ocr2keepers "github.com/smartcontractkit/chainlink-common/pkg/types/automation"
-
-	evm21 "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21"
-
 	commonhex "github.com/smartcontractkit/chainlink-common/pkg/utils/hex"
 
+	ac "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/automation_compatible_utils"
+	autov2common "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/i_automation_v21_plus_common"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
 	"github.com/smartcontractkit/chainlink/core/scripts/chaincli/config"
 	"github.com/smartcontractkit/chainlink/core/scripts/common"
-	ac "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/automation_compatible_utils"
-	autov2common "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/i_automation_v21_plus_common"
+	"github.com/smartcontractkit/chainlink/v2/core/cbor"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	evm21 "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/core"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/encoding"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper/evmregistry/v21/mercury"
@@ -43,8 +42,13 @@ import (
 const (
 	ConditionTrigger uint8 = iota
 	LogTrigger
-	expectedTypeAndVersion = "KeeperRegistry 2.1.0"
+	expectedVersion21 = "KeeperRegistry 2.1.0"
+	expectedVersion23 = "AutomationRegistry 2.3.0"
 )
+
+type UpkeepOffchainConfig struct {
+	MaxGasPrice *big.Int `json:"maxGasPrice" cbor:"maxGasPrice"`
+}
 
 var mercuryPacker = mercury.NewAbiPacker()
 var packer = encoding.NewAbiPacker()
@@ -85,8 +89,8 @@ func (k *Keeper) Debug(ctx context.Context, args []string) {
 	if err != nil {
 		failCheckConfig("failed to get typeAndVersion: make sure your registry contract address and archive node are valid", err)
 	}
-	if typeAndVersion != expectedTypeAndVersion {
-		failCheckConfig(fmt.Sprintf("invalid registry contract: this command can only debug %s, got: %s", expectedTypeAndVersion, typeAndVersion), nil)
+	if typeAndVersion != expectedVersion21 && typeAndVersion != expectedVersion23 {
+		failCheckConfig(fmt.Sprintf("invalid registry contract: this command can only debug %s or %s, got: %s", expectedVersion21, expectedVersion23, typeAndVersion), nil)
 	}
 	// get upkeepID from command args
 	upkeepID := big.NewInt(0)
@@ -133,6 +137,10 @@ func (k *Keeper) Debug(ctx context.Context, args []string) {
 
 		// do basic checks
 		upkeepInfo = getUpkeepInfoAndRunBasicChecks(v2common, triggerCallOpts, upkeepID, chainID)
+
+		cgp, mgp := getGasPrice(ctx, k, upkeepInfo)
+		log.Printf("CURRENT gas price (you cannot call eth_gasPrice on any non latest block) is %s, this upkeep's MAX gas price is %s\n", cgp, mgp)
+		log.Printf("If upkeep's max gas price (if configured) is lower than the gas price when this upkeep was previously checked, the simulation will fail and this upkeep won't be performed.\n")
 
 		var tmpCheckResult autov2common.CheckUpkeep0
 		tmpCheckResult, err = v2common.CheckUpkeep0(triggerCallOpts, upkeepID)
@@ -193,7 +201,7 @@ func (k *Keeper) Debug(ctx context.Context, args []string) {
 		message(fmt.Sprintf("LogTrigger{blockNum: %d, blockHash: %s, txHash: %s, logIndex: %d}", blockNum, receipt.BlockHash.Hex(), txHash, logIndex))
 		trigger = mustAutomationTrigger(txHash, logIndex, blockNum, receipt.BlockHash)
 		workID = mustUpkeepWorkID(upkeepID, trigger)
-		message(fmt.Sprintf("workID computed: %s", hex.EncodeToString(workID[:])))
+		message("workID computed: " + hex.EncodeToString(workID[:]))
 
 		var hasKey bool
 		hasKey, err = v2common.HasDedupKey(latestCallOpts, workID)
@@ -207,6 +215,10 @@ func (k *Keeper) Debug(ctx context.Context, args []string) {
 
 		// do basic checks
 		upkeepInfo = getUpkeepInfoAndRunBasicChecks(v2common, triggerCallOpts, upkeepID, chainID)
+
+		cgp, mgp := getGasPrice(ctx, k, upkeepInfo)
+		log.Printf("CURRENT gas price (you cannot call eth_gasPrice on any non latest block) is %s, this upkeep's MAX gas price is %s\n", cgp, mgp)
+		log.Printf("If upkeep's max gas price (if configured) is lower than the gas price when this upkeep was previously checked, the simulation will fail and this upkeep won't be performed.\n")
 
 		var rawTriggerConfig []byte
 		rawTriggerConfig, err = v2common.GetUpkeepTriggerConfig(triggerCallOpts, upkeepID)
@@ -245,7 +257,8 @@ func (k *Keeper) Debug(ctx context.Context, args []string) {
 			failUnknown("failed to pack raw checkUpkeep call", err)
 		}
 		addLink("checkUpkeep simulation", tenderlySimLink(ctx, k.cfg, chainID, blockNum, rawCall, registryAddress))
-		rawCall = append(core.ILogAutomationABI.Methods["checkLog"].ID, triggerData...)
+		rawCall = core.ILogAutomationABI.Methods["checkLog"].ID
+		rawCall = append(rawCall, triggerData...)
 		addLink("checkLog (direct) simulation", tenderlySimLink(ctx, k.cfg, chainID, blockNum, rawCall, upkeepInfo.Target))
 	} else {
 		resolveIneligible(fmt.Sprintf("invalid trigger type: %d", triggerType))
@@ -253,12 +266,12 @@ func (k *Keeper) Debug(ctx context.Context, args []string) {
 
 	upkeepNeeded, performData = checkResult.UpkeepNeeded, checkResult.PerformData
 	if checkResult.UpkeepFailureReason != 0 {
-		message(fmt.Sprintf("checkUpkeep reverted with UpkeepFailureReason %s", getCheckUpkeepFailureReason(checkResult.UpkeepFailureReason)))
+		message("checkUpkeep reverted with UpkeepFailureReason " + getCheckUpkeepFailureReason(checkResult.UpkeepFailureReason))
 	}
 
 	// handle data streams lookup
 	if checkResult.UpkeepFailureReason == uint8(encoding.UpkeepFailureReasonTargetCheckReverted) {
-		mc := &types2.MercuryCredentials{LegacyURL: k.cfg.DataStreamsLegacyURL, URL: k.cfg.DataStreamsURL, Username: k.cfg.DataStreamsID, Password: k.cfg.DataStreamsKey}
+		mc := &commontypes.MercuryCredentials{LegacyURL: k.cfg.DataStreamsLegacyURL, URL: k.cfg.DataStreamsURL, Username: k.cfg.DataStreamsID, Password: k.cfg.DataStreamsKey}
 		mercuryConfig := evm21.NewMercuryConfig(mc, core.StreamsCompatibleABI)
 		lggr, _ := logger.NewLogger()
 		blockSub := &blockSubscriber{k.client}
@@ -270,6 +283,9 @@ func (k *Keeper) Debug(ctx context.Context, args []string) {
 			message("upkeep reverted with StreamsLookup")
 			message(fmt.Sprintf("StreamsLookup data: {FeedParamKey: %s, Feeds: %v, TimeParamKey: %s, Time: %d, ExtraData: %s}", streamsLookupErr.FeedParamKey, streamsLookupErr.Feeds, streamsLookupErr.TimeParamKey, streamsLookupErr.Time.Uint64(), hexutil.Encode(streamsLookupErr.ExtraData)))
 
+			if blockNum == 0 {
+				failCheckConfig("Data streams requires a valid block number for conditional upkeeps, append a block number to your command", nil)
+			}
 			streamsLookup := &mercury.StreamsLookup{
 				StreamsLookupError: &mercury.StreamsLookupError{
 					FeedParamKey: streamsLookupErr.FeedParamKey,
@@ -293,6 +309,9 @@ func (k *Keeper) Debug(ctx context.Context, args []string) {
 				if !allowed {
 					resolveIneligible("upkeep reverted with StreamsLookup but is not allowed to access streams")
 				}
+				if k.cfg.DataStreamsLegacyURL == "" {
+					failCheckConfig("Data streams v02 requires Legacy URL, check your DATA_STREAMS settings in .env", nil)
+				}
 			} else if streamsLookup.IsMercuryV03() {
 				// handle v0.3
 				message("using data streams lookup v0.3")
@@ -300,7 +319,7 @@ func (k *Keeper) Debug(ctx context.Context, args []string) {
 				resolveIneligible("upkeep reverted with StreamsLookup but the configuration is invalid")
 			}
 
-			if k.cfg.DataStreamsLegacyURL == "" || k.cfg.DataStreamsURL == "" || k.cfg.DataStreamsID == "" || k.cfg.DataStreamsKey == "" {
+			if k.cfg.DataStreamsURL == "" || k.cfg.DataStreamsID == "" || k.cfg.DataStreamsKey == "" {
 				failCheckConfig("Data streams configs not set properly for this network, check your DATA_STREAMS settings in .env", nil)
 			}
 
@@ -378,6 +397,36 @@ func (k *Keeper) Debug(ctx context.Context, args []string) {
 			resolveIneligible("simulate perform upkeep unsuccessful")
 		}
 	}
+}
+
+func getGasPrice(ctx context.Context, k *Keeper, upkeepInfo autov2common.IAutomationV21PlusCommonUpkeepInfoLegacy) (*assets.Wei, *assets.Wei) {
+	var cgp *assets.Wei
+	var err error
+	var gp *big.Int
+	// get gas price, eth_gasPrice does not take arguments, so we cannot access gas price at an older block
+	gp, err = k.client.SuggestGasPrice(ctx)
+	if err != nil {
+		log.Printf("⚠️ failed to get current gas price due to %v", err)
+	} else {
+		cgp = assets.NewWei(gp)
+		log.Printf("current gas price is %s", cgp)
+	}
+
+	var mgp *assets.Wei
+	// check if max gas price is configured
+	if len(upkeepInfo.OffchainConfig) != 0 {
+		var offchainConfig UpkeepOffchainConfig
+		err := cbor.ParseDietCBORToStruct(upkeepInfo.OffchainConfig, &offchainConfig)
+		if err != nil {
+			log.Printf("failed to parse offchain config bytes to max gas price\n")
+		} else {
+			mgp = assets.NewWei(offchainConfig.MaxGasPrice)
+		}
+	} else {
+		log.Printf("offchain config is not configured for this upkeep\n")
+	}
+
+	return cgp, mgp
 }
 
 func getUpkeepInfoAndRunBasicChecks(keeperRegistry21 *autov2common.IAutomationV21PlusCommon, callOpts *bind.CallOpts, upkeepID *big.Int, chainID int64) autov2common.IAutomationV21PlusCommonUpkeepInfoLegacy {
@@ -516,7 +565,7 @@ func mustUpkeepWorkID(upkeepID *big.Int, trigger ocr2keepers.Trigger) [32]byte {
 	}
 
 	var result [32]byte
-	copy(result[:], workIDBytes[:])
+	copy(result[:], workIDBytes)
 	return result
 }
 
@@ -547,7 +596,7 @@ func warning(msg string) {
 }
 
 func resolveIneligible(msg string) {
-	exit(fmt.Sprintf("❌ this upkeep is not eligible: %s", msg), nil, 0)
+	exit("❌ this upkeep is not eligible: "+msg, nil, 0)
 }
 
 func resolveEligible() {
@@ -563,11 +612,11 @@ func failUnknown(msg string, err error) {
 }
 
 func failCheckConfig(msg string, err error) {
-	rerun(fmt.Sprintf("%s: check your config", msg), err)
+	rerun(msg+": check your config", err)
 }
 
 func failCheckArgs(msg string, err error) {
-	rerun(fmt.Sprintf("%s: check your command arguments", msg), err)
+	rerun(msg+": check your command arguments", err)
 }
 
 func addLink(identifier string, link string) {
@@ -602,7 +651,7 @@ func tenderlySimLink(ctx context.Context, cfg *config.Config, chainID int64, blo
 		return errResult
 	}
 	values := map[string]interface{}{
-		"network_id": fmt.Sprintf("%d", chainID),
+		"network_id": strconv.FormatInt(chainID, 10),
 		"from":       "0x0000000000000000000000000000000000000000",
 		"input":      hexutil.Encode(input),
 		"to":         contractAddress.Hex(),

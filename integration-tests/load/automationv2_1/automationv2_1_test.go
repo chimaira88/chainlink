@@ -1,4 +1,4 @@
-package automationv2_1
+package automation
 
 import (
 	"context"
@@ -15,8 +15,6 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/wiremock"
-
 	geth "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -24,34 +22,32 @@ import (
 	"github.com/slack-go/slack"
 	"github.com/stretchr/testify/require"
 
-	ocr3 "github.com/smartcontractkit/libocr/offchainreporting2plus/ocr3confighelper"
-	"github.com/smartcontractkit/wasp"
+	"github.com/smartcontractkit/chainlink-testing-framework/wasp"
 
-	ocr2keepers30config "github.com/smartcontractkit/chainlink-automation/pkg/v3/config"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/environment"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/pkg/helm/chainlink"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/pkg/helm/ethereum"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/pkg/helm/wiremock"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/logging"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/networks"
+	seth_utils "github.com/smartcontractkit/chainlink-testing-framework/lib/utils/seth"
 
-	"github.com/smartcontractkit/chainlink-common/pkg/utils/tests"
-	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/environment"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/chainlink"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/ethereum"
-	"github.com/smartcontractkit/chainlink-testing-framework/logging"
-	"github.com/smartcontractkit/chainlink-testing-framework/networks"
-
-	ctfconfig "github.com/smartcontractkit/chainlink-testing-framework/config"
+	ctfconfig "github.com/smartcontractkit/chainlink-testing-framework/lib/config"
 
 	gowiremock "github.com/wiremock/go-wiremock"
 
+	"github.com/smartcontractkit/chainlink/deployment/environment/nodeclient"
+
+	ac "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/automation_compatible_utils"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/simple_log_upkeep_counter_wrapper"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/shared/generated/log_emitter"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions/automationv2"
-	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
 	contractseth "github.com/smartcontractkit/chainlink/integration-tests/contracts/ethereum"
 	tc "github.com/smartcontractkit/chainlink/integration-tests/testconfig"
 	aconfig "github.com/smartcontractkit/chainlink/integration-tests/testconfig/automation"
 	"github.com/smartcontractkit/chainlink/integration-tests/testreporters"
-	ac "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/automation_compatible_utils"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/log_emitter"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/simple_log_upkeep_counter_wrapper"
 )
 
 const (
@@ -60,17 +56,6 @@ const (
 )
 
 var (
-	baseTOML = `[Feature]
-LogPoller = true
-
-[OCR2]
-Enabled = true
-
-[P2P]
-[P2P.V2]
-Enabled = true
-AnnounceAddresses = ["0.0.0.0:6690"]
-ListenAddresses = ["0.0.0.0:6690"]`
 	secretsTOML = `[Mercury.Credentials.%s]
 LegacyURL = '%s'
 URL = '%s'
@@ -101,8 +86,9 @@ Password = '%s'`
 				"memory": "4Gi",
 			},
 		},
-		"stateful": true,
-		"capacity": "10Gi",
+		"stateful":                         true,
+		"capacity":                         "20Gi",
+		"enablePrometheusPostgresExporter": true,
 	}
 
 	recNodeSpec = map[string]interface{}{
@@ -132,7 +118,7 @@ Password = '%s'`
 	}
 )
 
-func setUpDataStreamsWireMock(url string) error {
+func setUpDataStreamsWireMock(ctx context.Context, url string) error {
 	wm := gowiremock.NewClient(url)
 	rule200 := gowiremock.Get(gowiremock.URLPathEqualTo("/api/v1/reports/bulk")).
 		WithQueryParam("feedIDs", gowiremock.EqualTo("0x000200")).
@@ -143,7 +129,12 @@ func setUpDataStreamsWireMock(url string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := http.Post(fmt.Sprintf("%s/__admin/mappings/save", url), "application/json", nil)
+	req, err := http.NewRequestWithContext(ctx, "POST", url+"/__admin/mappings/save", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return errors.New("error saving wiremock mappings")
 	}
@@ -162,10 +153,11 @@ func setUpDataStreamsWireMock(url string) error {
 }
 
 func TestLogTrigger(t *testing.T) {
-	ctx := tests.Context(t)
+	ctx := t.Context()
 	l := logging.GetTestLogger(t)
+	registryVersion := contractseth.RegistryVersion_2_1
 
-	loadedTestConfig, err := tc.GetConfig("Load", tc.Automation)
+	loadedTestConfig, err := tc.GetConfig([]string{"Load"}, tc.Automation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +184,7 @@ Spec Type: %s
 Log Level: %s
 Image: %s
 Tag: %s
-		
+
 Load Config:
 %s`
 
@@ -206,7 +198,13 @@ Load Config:
 	testNetwork := networks.MustGetSelectedNetworkConfig(loadedTestConfig.Network)[0]
 	testType := "load"
 	loadDuration := time.Duration(*loadedTestConfig.Automation.General.Duration) * time.Second
-	automationDefaultLinkFunds := big.NewInt(0).Mul(big.NewInt(1e18), big.NewInt(int64(10000))) //10000 LINK
+	automationDefaultLinkFunds := big.NewInt(0).Mul(big.NewInt(1e18), big.NewInt(int64(10000))) // 10000 LINK
+
+	nsLabels, err := environment.GetRequiredChainLinkNamespaceLabels(string(tc.Automation), testType)
+	require.NoError(t, err, "Error creating required chain.link labels for namespace")
+
+	workloadPodLabels, err := environment.GetRequiredChainLinkWorkloadAndPodLabels(string(tc.Automation), testType)
+	require.NoError(t, err, "Error creating required chain.link labels for workloads and pods")
 
 	testEnvironment := environment.New(&environment.Config{
 		TTL: loadDuration.Round(time.Hour) + time.Hour,
@@ -215,6 +213,9 @@ Load Config:
 			testType,
 			strings.ReplaceAll(strings.ToLower(testNetwork.Name), " ", "-"),
 		),
+		Labels:             nsLabels,
+		WorkloadLabels:     workloadPodLabels,
+		PodLabels:          workloadPodLabels,
 		Test:               t,
 		PreventPodEviction: true,
 	})
@@ -256,7 +257,6 @@ Load Config:
 		dbSpec = map[string]interface{}{"stateful": true}
 	default:
 		// minimum:
-
 	}
 
 	if *loadedTestConfig.Pyroscope.Enabled {
@@ -277,7 +277,7 @@ Load Config:
 			if !testEnvironment.Cfg.InsideK8s {
 				wiremockURL = testEnvironment.URLs[wiremock.LocalURLsKey][0]
 			}
-			err = setUpDataStreamsWireMock(wiremockURL)
+			err = setUpDataStreamsWireMock(ctx, wiremockURL)
 			require.NoError(t, err, "Error setting up wiremock server")
 		} else {
 			secretsTOML = fmt.Sprintf(
@@ -293,104 +293,50 @@ Load Config:
 	numberOfUpkeeps := *loadedTestConfig.Automation.General.NumberOfNodes
 
 	for i := 0; i < numberOfUpkeeps+1; i++ { // +1 for the OCR boot node
-		var nodeTOML string
-		if i == 1 || i == 3 {
-			nodeTOML = fmt.Sprintf("%s\n\n[Log]\nLevel = \"%s\"", baseTOML, *loadedTestConfig.Automation.General.ChainlinkNodeLogLevel)
-		} else {
-			nodeTOML = fmt.Sprintf("%s\n\n[Log]\nLevel = \"info\"", baseTOML)
-		}
-		nodeTOML = networks.AddNetworksConfig(nodeTOML, loadedTestConfig.Pyroscope, testNetwork)
-
 		var overrideFn = func(_ interface{}, target interface{}) {
 			ctfconfig.MustConfigOverrideChainlinkVersion(loadedTestConfig.GetChainlinkImageConfig(), target)
 			ctfconfig.MightConfigOverridePyroscopeKey(loadedTestConfig.GetPyroscopeConfig(), target)
 		}
 
+		tomlConfig, err := actions.BuildTOMLNodeConfigForK8s(&loadedTestConfig, testNetwork)
+		require.NoError(t, err, "Error building TOML config")
+
 		cd := chainlink.NewWithOverride(i, map[string]any{
-			"toml":        nodeTOML,
+			"toml":        tomlConfig,
 			"chainlink":   nodeSpec,
 			"db":          dbSpec,
 			"prometheus":  *loadedTestConfig.Automation.General.UsePrometheus,
 			"secretsToml": secretsTOML,
 		}, loadedTestConfig.ChainlinkImage, overrideFn)
-
 		testEnvironment.AddHelm(cd)
 	}
 
 	err = testEnvironment.Run()
 	require.NoError(t, err, "Error running chainlink DON")
 
-	chainClient, err := blockchain.NewEVMClient(testNetwork, testEnvironment, l)
-	require.NoError(t, err, "Error building chain client")
+	testNetwork = seth_utils.MustReplaceSimulatedNetworkUrlWithK8(l, testNetwork, *testEnvironment)
+	chainClient, err := seth_utils.GetChainClientWithConfigFunction(loadedTestConfig, testNetwork, seth_utils.OneEphemeralKeysLiveTestnetCheckFn)
+	require.NoError(t, err, "Error creating seth client")
 
-	contractDeployer, err := contracts.NewContractDeployer(chainClient, l)
-	require.NoError(t, err, "Error building contract deployer")
-
-	chainlinkNodes, err := client.ConnectChainlinkNodes(testEnvironment)
+	chainlinkNodes, err := nodeclient.ConnectChainlinkNodes(testEnvironment)
 	require.NoError(t, err, "Error connecting to chainlink nodes")
 
-	chainClient.ParallelTransactions(true)
-
-	multicallAddress, err := contractDeployer.DeployMultiCallContract()
+	multicallAddress, err := contracts.DeployMultiCallContract(chainClient)
 	require.NoError(t, err, "Error deploying multicall contract")
 
-	a := automationv2.NewAutomationTestK8s(chainClient, contractDeployer, chainlinkNodes)
-	conf := loadedTestConfig.Automation.AutomationConfig
-	a.RegistrySettings = contracts.KeeperRegistrySettings{
-		PaymentPremiumPPB:    *conf.RegistrySettings.PaymentPremiumPPB,
-		FlatFeeMicroLINK:     *conf.RegistrySettings.FlatFeeMicroLINK,
-		CheckGasLimit:        *conf.RegistrySettings.CheckGasLimit,
-		StalenessSeconds:     conf.RegistrySettings.StalenessSeconds,
-		GasCeilingMultiplier: *conf.RegistrySettings.GasCeilingMultiplier,
-		MaxPerformGas:        *conf.RegistrySettings.MaxPerformGas,
-		MinUpkeepSpend:       conf.RegistrySettings.MinUpkeepSpend,
-		FallbackGasPrice:     conf.RegistrySettings.FallbackGasPrice,
-		FallbackLinkPrice:    conf.RegistrySettings.FallbackLinkPrice,
-		MaxCheckDataSize:     *conf.RegistrySettings.MaxCheckDataSize,
-		MaxPerformDataSize:   *conf.RegistrySettings.MaxPerformDataSize,
-		MaxRevertDataSize:    *conf.RegistrySettings.MaxRevertDataSize,
-		RegistryVersion:      contractseth.RegistryVersion_2_1,
-	}
+	a := automationv2.NewAutomationTestK8s(l, chainClient, chainlinkNodes, &loadedTestConfig)
+	a.RegistrySettings = actions.ReadRegistryConfig(loadedTestConfig)
+	a.RegistrySettings.RegistryVersion = registryVersion
+	a.PluginConfig = actions.ReadPluginConfig(loadedTestConfig)
+	a.PublicConfig = actions.ReadPublicConfig(loadedTestConfig)
 	a.RegistrarSettings = contracts.KeeperRegistrarSettings{
 		AutoApproveConfigType: uint8(2),
-		AutoApproveMaxAllowed: math.MaxUint16,
+		AutoApproveMaxAllowed: 1000,
 		MinLinkJuels:          big.NewInt(0),
-	}
-	a.PluginConfig = ocr2keepers30config.OffchainConfig{
-		TargetProbability:    *conf.PluginConfig.TargetProbability,
-		TargetInRounds:       *conf.PluginConfig.TargetInRounds,
-		PerformLockoutWindow: *conf.PluginConfig.PerformLockoutWindow,
-		GasLimitPerReport:    *conf.PluginConfig.GasLimitPerReport,
-		GasOverheadPerUpkeep: *conf.PluginConfig.GasOverheadPerUpkeep,
-		MinConfirmations:     *conf.PluginConfig.MinConfirmations,
-		MaxUpkeepBatchSize:   *conf.PluginConfig.MaxUpkeepBatchSize,
-		LogProviderConfig: ocr2keepers30config.LogProviderConfig{
-			BlockRate: *conf.PluginConfig.LogProviderConfig.BlockRate,
-			LogLimit:  *conf.PluginConfig.LogProviderConfig.LogLimit,
-		},
-	}
-	a.PublicConfig = ocr3.PublicConfig{
-		DeltaProgress:                           *conf.PublicConfig.DeltaProgress,
-		DeltaResend:                             *conf.PublicConfig.DeltaResend,
-		DeltaInitial:                            *conf.PublicConfig.DeltaInitial,
-		DeltaRound:                              *conf.PublicConfig.DeltaRound,
-		DeltaGrace:                              *conf.PublicConfig.DeltaGrace,
-		DeltaCertifiedCommitRequest:             *conf.PublicConfig.DeltaCertifiedCommitRequest,
-		DeltaStage:                              *conf.PublicConfig.DeltaStage,
-		RMax:                                    *conf.PublicConfig.RMax,
-		MaxDurationQuery:                        *conf.PublicConfig.MaxDurationQuery,
-		MaxDurationObservation:                  *conf.PublicConfig.MaxDurationObservation,
-		MaxDurationShouldAcceptAttestedReport:   *conf.PublicConfig.MaxDurationShouldAcceptAttestedReport,
-		MaxDurationShouldTransmitAcceptedReport: *conf.PublicConfig.MaxDurationShouldTransmitAcceptedReport,
-		F:                                       *conf.PublicConfig.F,
 	}
 
 	if *loadedTestConfig.Automation.DataStreams.Enabled {
 		a.SetMercuryCredentialName("cred1")
-	}
-
-	if *conf.UseLogBufferV1 {
-		a.SetUseLogBufferV1(true)
 	}
 
 	startTimeTestSetup := time.Now()
@@ -398,7 +344,7 @@ Load Config:
 
 	a.SetupAutomationDeployment(t)
 
-	err = actions.FundChainlinkNodesAddress(chainlinkNodes[1:], chainClient, big.NewFloat(*loadedTestConfig.Common.ChainlinkNodeFunding), 0)
+	err = actions.FundChainlinkNodesFromRootAddress(l, a.ChainClient, contracts.ChainlinkK8sClientToChainlinkNodeWithKeysAndAddress(chainlinkNodes[1:]), big.NewFloat(*loadedTestConfig.Common.ChainlinkNodeFunding))
 	require.NoError(t, err, "Error funding chainlink nodes")
 
 	consumerContracts := make([]contracts.KeeperConsumer, 0)
@@ -422,54 +368,25 @@ Load Config:
 
 	upkeepConfigs := make([]automationv2.UpkeepConfig, 0)
 	loadConfigs := make([]aconfig.Load, 0)
-	cEVMClient, err := blockchain.ConcurrentEVMClient(testNetwork, testEnvironment, chainClient, l)
-	require.NoError(t, err, "Error building concurrent chain client")
+
+	expectedTotalUpkeepCount := 0
+	for _, u := range loadedTestConfig.Automation.Load {
+		expectedTotalUpkeepCount += *u.NumberOfUpkeeps
+	}
+
+	maxDeploymentConcurrency := 100
 
 	for _, u := range loadedTestConfig.Automation.Load {
-		for i := 0; i < *u.NumberOfUpkeeps; i++ {
-			consumerContract, err := contractDeployer.DeployAutomationSimpleLogTriggerConsumer(*u.IsStreamsLookup)
-			require.NoError(t, err, "Error deploying automation consumer contract")
-			consumerContracts = append(consumerContracts, consumerContract)
-			l.Debug().
-				Str("Contract Address", consumerContract.Address()).
-				Int("Number", i+1).
-				Int("Out Of", *u.NumberOfUpkeeps).
-				Msg("Deployed Automation Log Trigger Consumer Contract")
+		deploymentData, err := deployConsumerAndTriggerContracts(l, u, a.ChainClient, multicallAddress, maxDeploymentConcurrency, automationDefaultLinkFunds, a.LinkToken)
+		require.NoError(t, err, "Error deploying consumer and trigger contracts")
 
-			loadCfg := aconfig.Load{
-				NumberOfEvents:                u.NumberOfEvents,
-				NumberOfSpamMatchingEvents:    u.NumberOfSpamMatchingEvents,
-				NumberOfSpamNonMatchingEvents: u.NumberOfSpamNonMatchingEvents,
-				CheckBurnAmount:               u.CheckBurnAmount,
-				PerformBurnAmount:             u.PerformBurnAmount,
-				UpkeepGasLimit:                u.UpkeepGasLimit,
-				SharedTrigger:                 u.SharedTrigger,
-				Feeds:                         []string{},
-			}
-
-			if *u.IsStreamsLookup {
-				loadCfg.Feeds = u.Feeds
-			}
-
-			loadConfigs = append(loadConfigs, loadCfg)
-
-			if *u.SharedTrigger && i > 0 {
-				triggerAddresses = append(triggerAddresses, triggerAddresses[len(triggerAddresses)-1])
-				continue
-			}
-			triggerContract, err := contractDeployer.DeployLogEmitterContract()
-			require.NoError(t, err, "Error deploying log emitter contract")
-			triggerContracts = append(triggerContracts, triggerContract)
-			triggerAddresses = append(triggerAddresses, triggerContract.Address())
-			l.Debug().
-				Str("Contract Address", triggerContract.Address().Hex()).
-				Int("Number", i+1).
-				Int("Out Of", *u.NumberOfUpkeeps).
-				Msg("Deployed Automation Log Trigger Emitter Contract")
-		}
-		err = chainClient.WaitForEvents()
-		require.NoError(t, err, "Failed waiting for contracts to deploy")
+		consumerContracts = append(consumerContracts, deploymentData.ConsumerContracts...)
+		triggerContracts = append(triggerContracts, deploymentData.TriggerContracts...)
+		triggerAddresses = append(triggerAddresses, deploymentData.TriggerAddresses...)
+		loadConfigs = append(loadConfigs, deploymentData.LoadConfigs...)
 	}
+
+	require.Len(t, consumerContracts, expectedTotalUpkeepCount, "Incorrect number of consumer/trigger contracts deployed")
 
 	for i, consumerContract := range consumerContracts {
 		logTriggerConfigStruct := ac.IAutomationV21PlusCommonLogTriggerConfig{
@@ -504,32 +421,31 @@ Load Config:
 			EncryptedEmail: []byte("test@mail.com"),
 			UpkeepContract: common.HexToAddress(consumerContract.Address()),
 			GasLimit:       *loadConfigs[i].UpkeepGasLimit,
-			AdminAddress:   common.HexToAddress(chainClient.GetDefaultWallet().Address()),
+			AdminAddress:   chainClient.MustGetRootKeyAddress(),
 			TriggerType:    uint8(1),
 			CheckData:      encodedCheckDataStruct,
 			TriggerConfig:  encodedLogTriggerConfig,
-			OffchainConfig: []byte("0"),
+			OffchainConfig: []byte(""),
 			FundingAmount:  automationDefaultLinkFunds,
 		}
 		l.Debug().Interface("Upkeep Config", upkeepConfig).Msg("Upkeep Config")
 		upkeepConfigs = append(upkeepConfigs, upkeepConfig)
 	}
 
-	registrationTxHashes, err := a.RegisterUpkeeps(upkeepConfigs)
+	require.Len(t, upkeepConfigs, expectedTotalUpkeepCount, "Incorrect number of upkeep configs created")
+	registrationTxHashes, err := a.RegisterUpkeeps(upkeepConfigs, maxDeploymentConcurrency)
 	require.NoError(t, err, "Error registering upkeeps")
 
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Failed waiting for upkeeps to register")
-
-	upkeepIds, err := a.ConfirmUpkeepsRegistered(registrationTxHashes)
+	upkeepIDs, err := a.ConfirmUpkeepsRegistered(registrationTxHashes, maxDeploymentConcurrency)
 	require.NoError(t, err, "Error confirming upkeeps registered")
+	require.Len(t, upkeepIDs, expectedTotalUpkeepCount, "Incorrect number of upkeeps registered")
 
 	l.Info().Msg("Successfully registered all Automation Upkeeps")
-	l.Info().Interface("Upkeep IDs", upkeepIds).Msg("Upkeeps Registered")
+	l.Info().Interface("Upkeep IDs", upkeepIDs).Msg("Upkeeps Registered")
 	l.Info().Str("STARTUP_WAIT_TIME", StartupWaitTime.String()).Msg("Waiting for plugin to start")
 	time.Sleep(StartupWaitTime)
 
-	startBlock, err := chainClient.LatestBlockNumber(ctx)
+	startBlock, err := a.ChainClient.Client.BlockNumber(ctx)
 	require.NoError(t, err, "Error getting latest block number")
 
 	p := wasp.NewProfile()
@@ -545,7 +461,7 @@ Load Config:
 			NumberOfSpamMatchingEvents:    int64(*loadConfigs[i].NumberOfSpamMatchingEvents),
 			NumberOfSpamNonMatchingEvents: int64(*loadConfigs[i].NumberOfSpamNonMatchingEvents),
 		}
-		numberOfEventsEmittedPerSec = numberOfEventsEmittedPerSec + int64(*loadConfigs[i].NumberOfEvents)
+		numberOfEventsEmittedPerSec += int64(*loadConfigs[i].NumberOfEvents)
 		configs = append(configs, c)
 	}
 
@@ -575,7 +491,7 @@ Load Config:
 		Gun: NewLogTriggerUser(
 			l,
 			configs,
-			cEVMClient,
+			a.ChainClient,
 			multicallAddress.Hex(),
 		),
 		CallResultBufLen: 1000,
@@ -601,7 +517,7 @@ Load Config:
 		Msg("Test execution ended")
 
 	l.Info().Str("Duration", testExDuration.String()).Msg("Test Execution Duration")
-	endBlock, err := chainClient.LatestBlockNumber(ctx)
+	endBlock, err := chainClient.Client.BlockNumber(ctx)
 	require.NoError(t, err, "Error getting latest block number")
 	l.Info().Uint64("Starting Block", startBlock).Uint64("Ending Block", endBlock).Msg("Test Block Range")
 
@@ -637,20 +553,20 @@ Load Config:
 				ToBlock:   big.NewInt(0).SetUint64(fromBlock + batchSize),
 				Topics:    [][]common.Hash{{consumerABI.Events["PerformingUpkeep"].ID}},
 			}
-			err = fmt.Errorf("initial error") // to ensure our for loop runs at least once
+			err = errors.New("initial error") // to ensure our for loop runs at least once
 			for err != nil {
 				var (
 					logsInBatch []types.Log
 				)
 				ctx2, cancel := context.WithTimeout(ctx, timeout)
-				logsInBatch, err = chainClient.FilterLogs(ctx2, filterQuery)
+				logsInBatch, err = a.ChainClient.Client.FilterLogs(ctx2, filterQuery)
 				cancel()
 				if err != nil {
 					l.Error().Err(err).
 						Interface("FilterQuery", filterQuery).
 						Str("Contract Address", consumerContract.Address()).
 						Str("Timeout", timeout.String()).
-						Msg("Error getting logs")
+						Msg("Error getting consumer contract logs")
 					timeout = time.Duration(math.Min(float64(timeout)*2, float64(2*time.Minute)))
 					continue
 				}
@@ -658,7 +574,8 @@ Load Config:
 					Interface("FilterQuery", filterQuery).
 					Str("Contract Address", consumerContract.Address()).
 					Str("Timeout", timeout.String()).
-					Msg("Collected logs")
+					Int("Number of Logs", len(logsInBatch)).
+					Msg("Collected consumer contract logs")
 				logs = append(logs, logsInBatch...)
 			}
 		}
@@ -670,7 +587,7 @@ Load Config:
 				eventDetails, err := consumerABI.EventByID(log.Topics[0])
 				require.NoError(t, err, "Error getting event details")
 				consumer, err := simple_log_upkeep_counter_wrapper.NewSimpleLogUpkeepCounter(
-					address, chainClient.Backend(),
+					address, a.ChainClient.Client,
 				)
 				require.NoError(t, err, "Error getting consumer contract")
 				if eventDetails.Name == "PerformingUpkeep" {
@@ -701,32 +618,33 @@ Load Config:
 				ToBlock:   big.NewInt(0).SetUint64(fromBlock + batchSize),
 				Topics:    [][]common.Hash{{emitterABI.Events["Log4"].ID}, {bytes1}, {bytes1}},
 			}
-			err = fmt.Errorf("initial error") // to ensure our for loop runs at least once
+			err = errors.New("initial error") // to ensure our for loop runs at least once
 			for err != nil {
 				var (
 					logsInBatch []types.Log
 				)
 				ctx2, cancel := context.WithTimeout(ctx, timeout)
-				logsInBatch, err = chainClient.FilterLogs(ctx2, filterQuery)
+				logsInBatch, err = chainClient.Client.FilterLogs(ctx2, filterQuery)
 				cancel()
 				if err != nil {
 					l.Error().Err(err).
 						Interface("FilterQuery", filterQuery).
-						Str("Contract Address", triggerContract.Address().Hex()).
+						Str("Contract Address", address.Hex()).
 						Str("Timeout", timeout.String()).
-						Msg("Error getting logs")
+						Msg("Error getting trigger contract logs")
 					timeout = time.Duration(math.Min(float64(timeout)*2, float64(2*time.Minute)))
 					continue
 				}
 				l.Debug().
 					Interface("FilterQuery", filterQuery).
-					Str("Contract Address", triggerContract.Address().Hex()).
+					Str("Contract Address", address.Hex()).
 					Str("Timeout", timeout.String()).
-					Msg("Collected logs")
+					Int("Number of Logs", len(logsInBatch)).
+					Msg("Collected trigger contract logs")
 				logs = append(logs, logsInBatch...)
 			}
 		}
-		numberOfEventsEmitted = numberOfEventsEmitted + int64(len(logs))
+		numberOfEventsEmitted += int64(len(logs))
 	}
 
 	l.Info().Int64("Number of Events Emitted", numberOfEventsEmitted).Msg("Number of Events Emitted")
@@ -824,19 +742,18 @@ Test Duration: %s`
 	}
 
 	t.Cleanup(func() {
-		if err = actions.TeardownRemoteSuite(t, testEnvironment.Cfg.Namespace, chainlinkNodes, nil, &loadedTestConfig, chainClient); err != nil {
+		if err = actions.TeardownRemoteSuite(t, chainClient, testEnvironment.Cfg.Namespace, chainlinkNodes, nil, &loadedTestConfig); err != nil {
 			l.Error().Err(err).Msg("Error when tearing down remote suite")
 			testEnvironment.Cfg.TTL += time.Hour * 48
 			err := testEnvironment.Run()
 			if err != nil {
 				l.Error().Err(err).Msg("Error increasing TTL of namespace")
 			}
-		} else if chainClient.NetworkSimulated() {
+		} else if chainClient.Cfg.IsSimulatedNetwork() && *loadedTestConfig.Automation.General.RemoveNamespace {
 			err := testEnvironment.Client.RemoveNamespace(testEnvironment.Cfg.Namespace)
 			if err != nil {
 				l.Error().Err(err).Msg("Error removing namespace")
 			}
 		}
 	})
-
 }

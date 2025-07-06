@@ -2,7 +2,7 @@ package upkeepstate
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"math/big"
 	"sync"
 	"testing"
@@ -140,7 +140,7 @@ func TestUpkeepStateStore(t *testing.T) {
 			},
 			workIDsSelect:      []string{"0x1", "0x2"},
 			workIDsFromScanner: []string{"0x2", "0x222"},
-			errScanner:         fmt.Errorf("test error"),
+			errScanner:         errors.New("test error"),
 			errored:            true,
 		},
 		{
@@ -157,7 +157,7 @@ func TestUpkeepStateStore(t *testing.T) {
 			},
 			workIDsSelect:      []string{"0x1", "0x2"},
 			workIDsFromScanner: []string{"0x2", "0x222"},
-			errDB:              fmt.Errorf("test error"),
+			errDB:              errors.New("test error"),
 			errored:            true,
 		},
 	}
@@ -516,7 +516,7 @@ func (s *mockScanner) ScanWorkIDs(context.Context, ...string) ([]string, error) 
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	res := s.workIDs[:]
+	res := s.workIDs
 	s.workIDs = nil
 	return res, s.err
 }
@@ -559,7 +559,7 @@ func (_m *mockORM) SelectStatesByWorkIDs(ctx context.Context, workIDs []string) 
 	_m.lock.Lock()
 	defer _m.lock.Unlock()
 
-	res := _m.records[:]
+	res := _m.records
 	_m.records = nil
 
 	return res, _m.err

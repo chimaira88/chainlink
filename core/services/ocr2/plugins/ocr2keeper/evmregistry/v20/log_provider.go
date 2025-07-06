@@ -2,7 +2,9 @@ package evm
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,9 +19,9 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
 
-	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
-	registry "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/keeper_registry_wrapper2_0"
+	registry "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/keeper_registry_wrapper2_0"
+	evmclient "github.com/smartcontractkit/chainlink-evm/pkg/client"
+	"github.com/smartcontractkit/chainlink-evm/pkg/logpoller"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
@@ -64,7 +66,7 @@ func NewLogProvider(
 
 	abi, err := abi.JSON(strings.NewReader(registry.KeeperRegistryABI))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrABINotParsable, err)
+		return nil, fmt.Errorf("%w: %w", ErrABINotParsable, err)
 	}
 
 	// Add log filters for the log poller so that it can poll and find the logs that
@@ -250,7 +252,7 @@ func (c *LogProvider) StaleReportLogs(ctx context.Context) ([]ocr2keepers.StaleR
 	vals := []ocr2keepers.StaleReportLog{}
 	for _, r := range reorged {
 		upkeepId := ocr2keepers.UpkeepIdentifier(r.Id.String())
-		checkBlockNumber, err := c.getCheckBlockNumberFromTxHash(r.TxHash, upkeepId)
+		checkBlockNumber, err := c.getCheckBlockNumberFromTxHash(ctx, r.TxHash, upkeepId)
 		if err != nil {
 			c.logger.Error("error while fetching checkBlockNumber from reorged report log: %w", err)
 			continue
@@ -265,7 +267,7 @@ func (c *LogProvider) StaleReportLogs(ctx context.Context) ([]ocr2keepers.StaleR
 	}
 	for _, r := range staleUpkeep {
 		upkeepId := ocr2keepers.UpkeepIdentifier(r.Id.String())
-		checkBlockNumber, err := c.getCheckBlockNumberFromTxHash(r.TxHash, upkeepId)
+		checkBlockNumber, err := c.getCheckBlockNumberFromTxHash(ctx, r.TxHash, upkeepId)
 		if err != nil {
 			c.logger.Error("error while fetching checkBlockNumber from stale report log: %w", err)
 			continue
@@ -280,7 +282,7 @@ func (c *LogProvider) StaleReportLogs(ctx context.Context) ([]ocr2keepers.StaleR
 	}
 	for _, r := range insufficientFunds {
 		upkeepId := ocr2keepers.UpkeepIdentifier(r.Id.String())
-		checkBlockNumber, err := c.getCheckBlockNumberFromTxHash(r.TxHash, upkeepId)
+		checkBlockNumber, err := c.getCheckBlockNumberFromTxHash(ctx, r.TxHash, upkeepId)
 		if err != nil {
 			c.logger.Error("error while fetching checkBlockNumber from insufficient funds report log: %w", err)
 			continue
@@ -411,7 +413,7 @@ func (c *LogProvider) unmarshalInsufficientFundsUpkeepLogs(logs []logpoller.Log)
 
 // Fetches the checkBlockNumber for a particular transaction and an upkeep ID. Requires a RPC call to get txData
 // so this function should not be used heavily
-func (c *LogProvider) getCheckBlockNumberFromTxHash(txHash common.Hash, id ocr2keepers.UpkeepIdentifier) (bk ocr2keepers.BlockKey, e error) {
+func (c *LogProvider) getCheckBlockNumberFromTxHash(ctx context.Context, txHash common.Hash, id ocr2keepers.UpkeepIdentifier) (bk ocr2keepers.BlockKey, e error) {
 	defer func() {
 		if r := recover(); r != nil {
 			e = fmt.Errorf("recovered from panic in getCheckBlockNumberForUpkeep: %v", r)
@@ -425,7 +427,7 @@ func (c *LogProvider) getCheckBlockNumberFromTxHash(txHash common.Hash, id ocr2k
 	}
 
 	var tx gethtypes.Transaction
-	err := c.client.CallContext(context.Background(), &tx, "eth_getTransactionByHash", txHash)
+	err := c.client.CallContext(ctx, &tx, "eth_getTransactionByHash", txHash)
 	if err != nil {
 		return "", err
 	}
@@ -444,11 +446,11 @@ func (c *LogProvider) getCheckBlockNumberFromTxHash(txHash common.Hash, id ocr2k
 		// TODO: the log provider should be in the evm package for isolation
 		res, ok := upkeep.(EVMAutomationUpkeepResult20)
 		if !ok {
-			return "", fmt.Errorf("unexpected type")
+			return "", errors.New("unexpected type")
 		}
 
 		if res.ID.String() == string(id) {
-			bl := fmt.Sprintf("%d", res.Block)
+			bl := strconv.FormatUint(uint64(res.Block), 10)
 
 			c.txCheckBlockCache.Set(cacheKey, bl, pluginutils.DefaultCacheExpiration)
 

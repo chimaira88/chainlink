@@ -11,8 +11,6 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/p2pkey"
 )
 
-//go:generate mockery --quiet --name P2P --output ./mocks/ --case=underscore --filename p2p.go
-
 type P2P interface {
 	Get(id p2pkey.PeerID) (p2pkey.KeyV2, error)
 	GetAll() ([]p2pkey.KeyV2, error)
@@ -112,7 +110,7 @@ func (ks *p2p) Import(ctx context.Context, keyJSON []byte, password string) (p2p
 		return p2pkey.KeyV2{}, errors.Wrap(err, "P2PKeyStore#ImportKey failed to decrypt key")
 	}
 	if _, found := ks.keyRing.P2P[key.ID()]; found {
-		return p2pkey.KeyV2{}, fmt.Errorf("key with ID %s already exists", key.ID())
+		return p2pkey.KeyV2{}, fmt.Errorf("p2p key %s: %w", key.ID(), ErrKeyExists)
 	}
 	return key, ks.keyManager.safeAddKey(ctx, key)
 }
@@ -175,7 +173,7 @@ func (ks *p2p) GetOrFirst(id p2pkey.PeerID) (p2pkey.KeyV2, error) {
 	for _, key := range ks.keyRing.P2P {
 		possibleKeys = append(possibleKeys, key.ID())
 	}
-	//To avoid ambiguity, we require the user to specify a peer ID if there are multiple keys
+	// To avoid ambiguity, we require the user to specify a peer ID if there are multiple keys
 	return p2pkey.KeyV2{}, errors.New(
 		"multiple p2p keys found but peer ID was not set - you must specify a P2P.PeerID " +
 			"config var if you have more than one key, or delete the keys you aren't using" +

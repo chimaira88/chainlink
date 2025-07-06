@@ -8,11 +8,12 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/pkg/errors"
+
 	ocrcommon "github.com/smartcontractkit/libocr/commontypes"
 	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
 type db struct {
@@ -219,7 +220,7 @@ func (d *db) StorePendingTransmission(ctx context.Context, t ocrtypes.ReportTime
 	copy(digest, t.ConfigDigest[:])
 
 	extraHash := make([]byte, 32)
-	copy(extraHash[:], tx.ExtraHash[:])
+	copy(extraHash, tx.ExtraHash[:])
 
 	stmt := `
 	INSERT INTO ocr2_pending_transmissions (
@@ -278,7 +279,7 @@ func (d *db) PendingTransmissionsWithConfigDigest(ctx context.Context, cd ocrtyp
 	FROM ocr2_pending_transmissions
 	WHERE ocr2_oracle_spec_id = $1 AND config_digest = $2
 	`
-	rows, err := d.ds.QueryxContext(ctx, stmt, d.oracleSpecID, cd) //nolint sqlclosecheck false positive
+	rows, err := d.ds.QueryxContext(ctx, stmt, d.oracleSpecID, cd)
 	if err != nil {
 		return nil, errors.Wrap(err, "PendingTransmissionsWithConfigDigest failed to query rows")
 	}

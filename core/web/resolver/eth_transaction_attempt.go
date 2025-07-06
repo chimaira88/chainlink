@@ -3,7 +3,7 @@ package resolver
 import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
 	"github.com/smartcontractkit/chainlink/v2/core/utils/stringutils"
 )
 
@@ -26,7 +26,7 @@ func NewEthTransactionsAttempts(results []txmgr.TxAttempt) []*EthTransactionAtte
 }
 
 func (r *EthTransactionAttemptResolver) GasPrice() string {
-	return r.attmpt.TxFee.Legacy.ToInt().String()
+	return r.attmpt.TxFee.GasPrice.ToInt().String()
 }
 
 func (r *EthTransactionAttemptResolver) Hash() string {

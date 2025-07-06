@@ -1,7 +1,7 @@
 package core
 
 import (
-	"fmt"
+	"errors"
 	"math/big"
 	"testing"
 
@@ -9,10 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
-	evmClientMocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
+	"github.com/smartcontractkit/chainlink-evm/pkg/client/clienttest"
+	"github.com/smartcontractkit/chainlink-evm/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
 )
 
 func TestUtils_GetTxBlock(t *testing.T) {
@@ -35,7 +34,7 @@ func TestUtils_GetTxBlock(t *testing.T) {
 		{
 			name:         "failure - eth call error",
 			txHash:       common.HexToHash("0xc48fbf05edaf18f6aaa7de24de28528546b874bb03728d624ca407b8fed582a3"),
-			ethCallError: fmt.Errorf("eth call failed"),
+			ethCallError: errors.New("eth call failed"),
 		},
 		{
 			name:   "failure - tx does not exist",
@@ -48,7 +47,7 @@ func TestUtils_GetTxBlock(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		client := new(evmClientMocks.Client)
+		client := new(clienttest.Client)
 		client.On("CallContext", mock.Anything, mock.Anything, "eth_getTransactionReceipt", tt.txHash).
 			Return(tt.ethCallError).Run(func(args mock.Arguments) {
 			receipt := tt.receipt

@@ -11,11 +11,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	mercuryutils "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc/pb"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
 var (
@@ -159,7 +158,7 @@ func (v *cacheVal) waitForResult(ctx context.Context, chResult <-chan struct{}, 
 // first
 type memCache struct {
 	services.StateMachine
-	lggr logger.Logger
+	lggr logger.SugaredLogger
 
 	client Client
 
@@ -174,7 +173,7 @@ type memCache struct {
 func newMemCache(lggr logger.Logger, client Client, cfg Config) *memCache {
 	return &memCache{
 		services.StateMachine{},
-		lggr.Named("MemCache").Named(client.ServerURL()),
+		logger.Sugared(lggr).Named("MemCache").Named(client.ServerURL()),
 		client,
 		cfg,
 		sync.Map{},
@@ -346,13 +345,14 @@ func (m *memCache) runloop() {
 	if m.cfg.MaxStaleAge == 0 {
 		return
 	}
-	t := time.NewTicker(utils.WithJitter(m.cfg.MaxStaleAge))
+	t := services.NewTicker(m.cfg.MaxStaleAge)
+	defer t.Stop()
 
 	for {
 		select {
 		case <-t.C:
 			m.cleanup()
-			t.Reset(utils.WithJitter(m.cfg.MaxStaleAge))
+			t.Reset()
 		case <-m.chStop:
 			return
 		}

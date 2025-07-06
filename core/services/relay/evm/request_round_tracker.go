@@ -12,13 +12,13 @@ import (
 	"github.com/smartcontractkit/libocr/gethwrappers2/ocr2aggregator"
 	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
 
-	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/log"
+	evmclient "github.com/smartcontractkit/chainlink-evm/pkg/client"
+	"github.com/smartcontractkit/chainlink-evm/pkg/log"
 	offchain_aggregator_wrapper "github.com/smartcontractkit/chainlink/v2/core/internal/gethwrappers2/generated/offchainaggregator"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocrcommon"
 )
 
@@ -37,8 +37,7 @@ type RequestRoundTracker struct {
 	blockTranslator  ocrcommon.BlockTranslator
 
 	// Start/Stop lifecycle
-	ctx             context.Context
-	ctxCancel       context.CancelFunc
+	stopCh          services.StopChan
 	unsubscribeLogs func()
 
 	// LatestRoundRequested
@@ -58,7 +57,6 @@ func NewRequestRoundTracker(
 	odb RequestRoundDB,
 	chain ocrcommon.Config,
 ) (o *RequestRoundTracker) {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &RequestRoundTracker{
 		ethClient:        ethClient,
 		contract:         contract,
@@ -69,8 +67,7 @@ func NewRequestRoundTracker(
 		odb:              odb,
 		ds:               ds,
 		blockTranslator:  ocrcommon.NewBlockTranslator(chain, ethClient, lggr),
-		ctx:              ctx,
-		ctxCancel:        cancel,
+		stopCh:           make(chan struct{}),
 	}
 }
 
@@ -98,7 +95,7 @@ func (t *RequestRoundTracker) Start(ctx context.Context) error {
 // Close should be called after teardown of the OCR job relying on this tracker
 func (t *RequestRoundTracker) Close() error {
 	return t.StopOnce("RequestRoundTracker", func() error {
-		t.ctxCancel()
+		close(t.stopCh)
 		t.unsubscribeLogs()
 		return nil
 	})

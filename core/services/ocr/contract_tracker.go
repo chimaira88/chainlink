@@ -2,7 +2,7 @@ package ocr
 
 import (
 	"context"
-	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,12 +22,12 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox"
 
-	"github.com/smartcontractkit/chainlink/v2/common/config"
-	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	httypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/headtracker/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/log"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/offchain_aggregator_wrapper"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/offchain_aggregator_wrapper"
+	evmclient "github.com/smartcontractkit/chainlink-evm/pkg/client"
+	"github.com/smartcontractkit/chainlink-evm/pkg/config/chaintype"
+	"github.com/smartcontractkit/chainlink-evm/pkg/heads"
+	"github.com/smartcontractkit/chainlink-evm/pkg/log"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocrcommon"
 )
@@ -41,13 +41,12 @@ const configMailboxSanityLimit = 100
 var (
 	_ ocrtypes.ContractConfigTracker = &OCRContractTracker{}
 	_ log.Listener                   = &OCRContractTracker{}
-	_ httypes.HeadTrackable          = &OCRContractTracker{}
+	_ heads.Trackable                = &OCRContractTracker{}
 
 	OCRContractConfigSet            = getEventTopic("ConfigSet")
 	OCRContractLatestRoundRequested = getEventTopic("RoundRequested")
 )
 
-//go:generate mockery --quiet --name OCRContractTrackerDB --output ./mocks/ --case=underscore
 type (
 	// OCRContractTracker complies with ContractConfigTracker interface and
 	// handles log events related to the contract more generally
@@ -68,7 +67,7 @@ type (
 		mailMon          *mailbox.Monitor
 
 		// HeadBroadcaster
-		headBroadcaster  httypes.HeadBroadcaster
+		headBroadcaster  heads.Broadcaster
 		unsubscribeHeads func()
 
 		// Start/Stop lifecycle
@@ -114,7 +113,7 @@ func NewOCRContractTracker(
 	ds sqlutil.DataSource,
 	ocrDB OCRContractTrackerDB,
 	cfg ocrcommon.Config,
-	headBroadcaster httypes.HeadBroadcaster,
+	headBroadcaster heads.Broadcaster,
 	mailMon *mailbox.Monitor,
 ) (o *OCRContractTracker) {
 	logger = logger.Named("OCRContractTracker")
@@ -168,7 +167,7 @@ func (t *OCRContractTracker) Start(ctx context.Context) error {
 		t.wg.Add(1)
 		go t.processLogs()
 
-		t.mailMon.Monitor(t.configsMB, "OCRContractTracker", "Configs", fmt.Sprint(t.jobID))
+		t.mailMon.Monitor(t.configsMB, "OCRContractTracker", "Configs", strconv.Itoa(int(t.jobID)))
 
 		return nil
 	})
@@ -217,7 +216,7 @@ func (t *OCRContractTracker) processLogs() {
 		select {
 		case <-t.configsMB.Notify():
 			// NOTE: libocr could take an arbitrary amount of time to process a
-			// new config. To avoid blocking the log broadcaster, we use this
+			// new chaintype. To avoid blocking the log broadcaster, we use this
 			// background thread to deliver them and a mailbox as the buffer.
 			for {
 				cc, exists := t.configsMB.Retrieve()
@@ -395,12 +394,12 @@ func (t *OCRContractTracker) ConfigFromLogs(ctx context.Context, changedInBlock 
 // LatestBlockHeight queries the eth node for the most recent header
 func (t *OCRContractTracker) LatestBlockHeight(ctx context.Context) (blockheight uint64, err error) {
 	switch t.cfg.ChainType() {
-	case config.ChainMetis:
+	case chaintype.ChainMetis:
 		// We skip confirmation checking anyway on these L2s so there's no need to
 		// care about the block height; we have no way of getting the L1 block
 		// height anyway
 		return 0, nil
-	case "", config.ChainArbitrum, config.ChainCelo, config.ChainGnosis, config.ChainKroma, config.ChainOptimismBedrock, config.ChainScroll, config.ChainWeMix, config.ChainXDai, config.ChainXLayer, config.ChainZkSync:
+	case "", chaintype.ChainArbitrum, chaintype.ChainAstar, chaintype.ChainCelo, chaintype.ChainGnosis, chaintype.ChainHedera, chaintype.ChainKroma, chaintype.ChainOptimismBedrock, chaintype.ChainSei, chaintype.ChainScroll, chaintype.ChainWeMix, chaintype.ChainXLayer, chaintype.ChainZkEvm, chaintype.ChainZkSync, chaintype.ChainZircuit, chaintype.ChainRootstock:
 		// continue
 	}
 	latestBlockHeight := t.getLatestBlockHeight()
@@ -456,7 +455,7 @@ func getEventTopic(name string) gethCommon.Hash {
 	}
 	event, exists := abi.Events[name]
 	if !exists {
-		panic(fmt.Sprintf("abi.Events was missing %s", name))
+		panic("abi.Events was missing " + name)
 	}
 	return event.ID
 }

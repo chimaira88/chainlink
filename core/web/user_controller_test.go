@@ -240,14 +240,14 @@ func TestUserController_DeleteUser(t *testing.T) {
 	err := app.AuthenticationProvider().CreateUser(ctx, &user)
 	require.NoError(t, err)
 
-	resp, cleanup := client.Delete(fmt.Sprintf("/v2/users/%s", url.QueryEscape(user.Email)))
+	resp, cleanup := client.Delete("/v2/users/" + url.QueryEscape(user.Email))
 	t.Cleanup(cleanup)
 	errors := cltest.ParseJSONAPIErrors(t, resp.Body)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Empty(t, errors.Errors)
 
 	// second attempt would fail
-	resp, cleanup = client.Delete(fmt.Sprintf("/v2/users/%s", url.QueryEscape(user.Email)))
+	resp, cleanup = client.Delete("/v2/users/" + url.QueryEscape(user.Email))
 	t.Cleanup(cleanup)
 	errors = cltest.ParseJSONAPIErrors(t, resp.Body)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -271,8 +271,7 @@ func TestUserController_NewAPIToken(t *testing.T) {
 
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var authToken auth.Token
-	err = cltest.ParseJSONAPIResponse(t, resp, &authToken)
-	require.NoError(t, err)
+	cltest.ParseJSONAPIResponse(t, resp, &authToken)
 	assert.NotEmpty(t, authToken.AccessKey)
 	assert.NotEmpty(t, authToken.Secret)
 }

@@ -7,27 +7,25 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/onsi/gomega"
-	"github.com/smartcontractkit/seth"
 	"github.com/stretchr/testify/require"
 
-	ctfClient "github.com/smartcontractkit/chainlink-testing-framework/client"
-	ctf_config "github.com/smartcontractkit/chainlink-testing-framework/config"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/chaos"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/environment"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/chainlink"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/ethereum"
-	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/mockserver"
-	mockservercfg "github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/mockserver-cfg"
-	"github.com/smartcontractkit/chainlink-testing-framework/logging"
-	"github.com/smartcontractkit/chainlink-testing-framework/networks"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils/ptr"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils/testcontext"
-	actions_seth "github.com/smartcontractkit/chainlink/integration-tests/actions/seth"
-	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
-	"github.com/smartcontractkit/chainlink/integration-tests/utils"
+	ctfClient "github.com/smartcontractkit/chainlink-testing-framework/lib/client"
+	ctf_config "github.com/smartcontractkit/chainlink-testing-framework/lib/config"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/chaos"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/environment"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/pkg/helm/chainlink"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/pkg/helm/ethereum"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/pkg/helm/mockserver"
+	mockservercfg "github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/pkg/helm/mockserver-cfg"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/logging"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/networks"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/utils/ptr"
+	seth_utils "github.com/smartcontractkit/chainlink-testing-framework/lib/utils/seth"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/utils/testcontext"
 
+	"github.com/smartcontractkit/chainlink/deployment/environment/nodeclient"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
-	"github.com/smartcontractkit/chainlink/integration-tests/client"
+	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
 	tc "github.com/smartcontractkit/chainlink/integration-tests/testconfig"
 )
 
@@ -53,15 +51,10 @@ var (
 	chaosEndRound   int64 = 4
 )
 
-func getDefaultOcrSettings(config *tc.TestConfig) map[string]interface{} {
-	defaultOCRSettings["toml"] = networks.AddNetworksConfig(baseTOML, config.Pyroscope, networks.MustGetSelectedNetworkConfig(config.Network)[0])
-	return defaultAutomationSettings
-}
-
 func TestOCRChaos(t *testing.T) {
 	t.Parallel()
 	l := logging.GetTestLogger(t)
-	config, err := tc.GetConfig("Chaos", tc.OCR)
+	config, err := tc.GetConfig([]string{"Chaos"}, tc.OCR)
 	require.NoError(t, err, "Error getting config")
 
 	var overrideFn = func(_ interface{}, target interface{}) {
@@ -69,7 +62,12 @@ func TestOCRChaos(t *testing.T) {
 		ctf_config.MightConfigOverridePyroscopeKey(config.GetPyroscopeConfig(), target)
 	}
 
-	chainlinkCfg := chainlink.NewWithOverride(0, getDefaultOcrSettings(&config), config.ChainlinkImage, overrideFn)
+	tomlConfig, err := actions.BuildTOMLNodeConfigForK8s(&config, networks.MustGetSelectedNetworkConfig(config.Network)[0])
+	require.NoError(t, err, "Error building TOML config")
+
+	defaultOCRSettings["toml"] = tomlConfig
+
+	chainlinkCfg := chainlink.NewWithOverride(0, defaultOCRSettings, config.ChainlinkImage, overrideFn)
 
 	testCases := map[string]struct {
 		networkChart environment.ConnectedChart
@@ -86,7 +84,7 @@ func TestOCRChaos(t *testing.T) {
 		// and chaos.NewNetworkPartition method (https://chaos-mesh.org/docs/simulate-network-chaos-on-kubernetes/)
 		// in order to regenerate Go bindings if k8s version will be updated
 		// you can pull new CRD spec from your current cluster and check README here
-		// https://github.com/smartcontractkit/chainlink-testing-framework/k8s/blob/master/README.md
+		// https://github.com/smartcontractkit/chainlink-testing-framework/lib/k8s/blob/master/README.md
 		NetworkChaosFailMajorityNetwork: {
 			ethereum.New(nil),
 			chainlinkCfg,
@@ -143,15 +141,24 @@ func TestOCRChaos(t *testing.T) {
 		t.Run(fmt.Sprintf("OCR_%s", name), func(t *testing.T) {
 			t.Parallel()
 
+			nsLabels, err := environment.GetRequiredChainLinkNamespaceLabels("data-feedsv1.0", "chaos")
+			require.NoError(t, err, "Error creating required chain.link labels for namespace")
+
+			workloadPodLabels, err := environment.GetRequiredChainLinkWorkloadAndPodLabels("data-feedsv1.0", "chaos")
+			require.NoError(t, err, "Error creating required chain.link labels for workloads and pods")
+
 			testEnvironment := environment.New(&environment.Config{
 				NamespacePrefix: fmt.Sprintf("chaos-ocr-%s", name),
 				Test:            t,
+				Labels:          nsLabels,
+				WorkloadLabels:  workloadPodLabels,
+				PodLabels:       workloadPodLabels,
 			}).
 				AddHelm(mockservercfg.New(nil)).
 				AddHelm(mockserver.New(nil)).
 				AddHelm(testCase.networkChart).
 				AddHelm(testCase.clChart)
-			err := testEnvironment.Run()
+			err = testEnvironment.Run()
 			require.NoError(t, err)
 			if testEnvironment.WillUseRemoteRunner() {
 				return
@@ -165,37 +172,29 @@ func TestOCRChaos(t *testing.T) {
 			require.NoError(t, err)
 
 			cfg := config.MustCopy().(tc.TestConfig)
-			readSethCfg := cfg.GetSethConfig()
-			require.NotNil(t, readSethCfg, "Seth config shouldn't be nil")
 
 			network := networks.MustGetSelectedNetworkConfig(cfg.GetNetworkConfig())[0]
-			network = utils.MustReplaceSimulatedNetworkUrlWithK8(l, network, *testEnvironment)
+			network = seth_utils.MustReplaceSimulatedNetworkUrlWithK8(l, network, *testEnvironment)
 
-			sethCfg, err := utils.MergeSethAndEvmNetworkConfigs(network, *readSethCfg)
-			require.NoError(t, err, "Error merging seth and evm network configs")
-			err = utils.ValidateSethNetworkConfig(sethCfg.Network)
-			require.NoError(t, err, "Error validating seth network config")
-			seth, err := seth.NewClientWithConfig(&sethCfg)
+			seth, err := seth_utils.GetChainClient(&cfg, network)
 			require.NoError(t, err, "Error creating seth client")
 
-			chainlinkNodes, err := client.ConnectChainlinkNodes(testEnvironment)
+			chainlinkNodes, err := nodeclient.ConnectChainlinkNodes(testEnvironment)
 			require.NoError(t, err, "Connecting to chainlink nodes shouldn't fail")
 			bootstrapNode, workerNodes := chainlinkNodes[0], chainlinkNodes[1:]
 			t.Cleanup(func() {
-				err := actions_seth.TeardownRemoteSuite(t, seth, testEnvironment.Cfg.Namespace, chainlinkNodes, nil, &cfg)
+				err := actions.TeardownRemoteSuite(t, seth, testEnvironment.Cfg.Namespace, chainlinkNodes, nil, &cfg)
 				require.NoError(t, err, "Error tearing down environment")
 			})
 
-			ms, err := ctfClient.ConnectMockServer(testEnvironment)
-			require.NoError(t, err, "Creating mockserver clients shouldn't fail")
-
-			linkContract, err := contracts.DeployLinkTokenContract(l, seth)
+			ms := ctfClient.ConnectMockServer(testEnvironment)
+			linkContract, err := actions.LinkTokenContract(l, seth, config.OCR)
 			require.NoError(t, err, "Error deploying link token contract")
 
-			err = actions_seth.FundChainlinkNodesFromRootAddress(l, seth, contracts.ChainlinkK8sClientToChainlinkNodeWithKeysAndAddress(chainlinkNodes), big.NewFloat(10))
+			err = actions.FundChainlinkNodesFromRootAddress(l, seth, contracts.ChainlinkK8sClientToChainlinkNodeWithKeysAndAddress(chainlinkNodes), big.NewFloat(10))
 			require.NoError(t, err)
 
-			ocrInstances, err := actions_seth.DeployOCRv1Contracts(l, seth, 1, common.HexToAddress(linkContract.Address()), contracts.ChainlinkK8sClientToChainlinkNodeWithKeysAndAddress(workerNodes))
+			ocrInstances, err := actions.SetupOCRv1Contracts(l, seth, config.OCR, common.HexToAddress(linkContract.Address()), contracts.ChainlinkK8sClientToChainlinkNodeWithKeysAndAddress(workerNodes))
 			require.NoError(t, err)
 			err = actions.CreateOCRJobs(ocrInstances, bootstrapNode, workerNodes, 5, ms, fmt.Sprint(seth.ChainID))
 			require.NoError(t, err)

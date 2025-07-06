@@ -12,7 +12,7 @@ import (
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 	"github.com/smartcontractkit/wsrpc/credentials"
 
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/llo-feeds/generated/exposed_verifier"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/llo-feeds/generated/exposed_verifier"
 )
 
 func makeConfigDigestArgs() abi.Arguments {
@@ -37,6 +37,7 @@ func configDigest(
 	onchainConfig []byte,
 	offchainConfigVersion uint64,
 	offchainConfig []byte,
+	prefix types.ConfigDigestPrefix,
 ) types.ConfigDigest {
 	msg, err := configDigestArgs.Pack(
 		feedID,
@@ -60,10 +61,6 @@ func configDigest(
 		// assertion
 		panic("copy too little data")
 	}
-	binary.BigEndian.PutUint16(configDigest[:2], uint16(types.ConfigDigestPrefixMercuryV02))
-	if !(configDigest[0] == 0 && configDigest[1] == 6) {
-		// assertion
-		panic("unexpected mismatch")
-	}
+	binary.BigEndian.PutUint16(configDigest[:2], uint16(prefix))
 	return configDigest
 }

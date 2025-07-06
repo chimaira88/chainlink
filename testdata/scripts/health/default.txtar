@@ -31,23 +31,55 @@ fj293fbBnlQ!f9vNs
 HTTPPort = $PORT
 
 -- out.txt --
+ok HeadReporter
+ok Heartbeat
 ok JobSpawner
+ok LLOTransmissionReaper
 ok Mailbox.Monitor
 ok Mercury.WSRPCPool
 ok Mercury.WSRPCPool.CacheSet
 ok PipelineORM
 ok PipelineRunner
-ok PromReporter
+ok PipelineRunner.BridgeCache
+ok RetirementReportCache
 ok TelemetryManager
+ok WorkflowStore
 
 -- out.json --
 {
   "data": [
     {
       "type": "checks",
+      "id": "HeadReporter",
+      "attributes": {
+        "name": "HeadReporter",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "Heartbeat",
+      "attributes": {
+        "name": "Heartbeat",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
       "id": "JobSpawner",
       "attributes": {
         "name": "JobSpawner",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "LLOTransmissionReaper",
+      "attributes": {
+        "name": "LLOTransmissionReaper",
         "status": "passing",
         "output": ""
       }
@@ -99,9 +131,18 @@ ok TelemetryManager
     },
     {
       "type": "checks",
-      "id": "PromReporter",
+      "id": "PipelineRunner.BridgeCache",
       "attributes": {
-        "name": "PromReporter",
+        "name": "PipelineRunner.BridgeCache",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "RetirementReportCache",
+      "attributes": {
+        "name": "RetirementReportCache",
         "status": "passing",
         "output": ""
       }
@@ -111,6 +152,15 @@ ok TelemetryManager
       "id": "TelemetryManager",
       "attributes": {
         "name": "TelemetryManager",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "WorkflowStore",
+      "attributes": {
+        "name": "WorkflowStore",
         "status": "passing",
         "output": ""
       }

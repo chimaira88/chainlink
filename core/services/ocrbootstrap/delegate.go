@@ -9,7 +9,6 @@ import (
 
 	ocr "github.com/smartcontractkit/libocr/offchainreporting2plus"
 
-	commonlogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/loop"
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
 	"github.com/smartcontractkit/chainlink-common/pkg/types"
@@ -22,7 +21,7 @@ import (
 
 type RelayGetter interface {
 	Get(types.RelayID) (loop.Relayer, error)
-	GetIDToRelayerMap() (map[types.RelayID]loop.Relayer, error)
+	GetIDToRelayerMap() map[types.RelayID]loop.Relayer
 }
 
 // Delegate creates Bootstrap jobs
@@ -40,10 +39,16 @@ type Delegate struct {
 type relayConfig struct {
 	// providerType used for determining which type of contract to track config on
 	ProviderType string `json:"providerType"`
+	// HACK
 	// Extra fields to enable router proxy contract support. Must match field names of functions' PluginConfig.
 	DONID                           string `json:"donID"`
 	ContractVersion                 uint32 `json:"contractVersion"`
 	ContractUpdateCheckFrequencySec uint32 `json:"contractUpdateCheckFrequencySec"`
+
+	// Annoyingly, the pre-existing donID field is already reserved and has a
+	// special-case usage just for functions. It's also a string and not uint32
+	// as Baku requires.
+	LLODONID uint32 `json:"lloDonID"`
 }
 
 // NewDelegateBootstrap creates a new Delegate
@@ -112,7 +117,7 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) (services []
 
 	var relayCfg relayConfig
 	if err = json.Unmarshal(spec.RelayConfig.Bytes(), &relayCfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal relay config for bootstrap job: %w", err)
 	}
 
 	var configProvider types.ConfigProvider
@@ -158,19 +163,22 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) (services []
 	lggr := d.lggr.With(ctxVals.Args()...)
 	lggr.Infow("OCR2 job using local config",
 		"BlockchainTimeout", lc.BlockchainTimeout,
+		"ContractConfigLoadTimeout", lc.ContractConfigLoadTimeout,
 		"ContractConfigConfirmations", lc.ContractConfigConfirmations,
 		"ContractConfigTrackerPollInterval", lc.ContractConfigTrackerPollInterval,
 		"ContractTransmitterTransmitTimeout", lc.ContractTransmitterTransmitTimeout,
 		"DatabaseTimeout", lc.DatabaseTimeout,
+		"DefaultMaxDurationInitialization", lc.DefaultMaxDurationInitialization,
 	)
+	ocrLogger := ocrcommon.NewOCRWrapper(lggr.Named("OCRBootstrap"), d.ocr2Cfg.TraceLogging(), func(ctx context.Context, msg string) {
+		logger.Sugared(lggr).ErrorIf(d.jobORM.RecordError(ctx, jb.ID, msg), "unable to record error")
+	})
 	bootstrapNodeArgs := ocr.BootstrapperArgs{
-		BootstrapperFactory:   d.peerWrapper.Peer2,
-		ContractConfigTracker: configProvider.ContractConfigTracker(),
-		Database:              NewDB(d.ds, spec.ID, lggr),
-		LocalConfig:           lc,
-		Logger: commonlogger.NewOCRWrapper(lggr.Named("OCRBootstrap"), d.ocr2Cfg.TraceLogging(), func(msg string) {
-			logger.Sugared(lggr).ErrorIf(d.jobORM.RecordError(ctx, jb.ID, msg), "unable to record error")
-		}),
+		BootstrapperFactory:    d.peerWrapper.Peer2,
+		ContractConfigTracker:  configProvider.ContractConfigTracker(),
+		Database:               NewDB(d.ds, spec.ID, lggr),
+		LocalConfig:            lc,
+		Logger:                 ocrLogger,
 		OffchainConfigDigester: configProvider.OffchainConfigDigester(),
 	}
 	lggr.Debugw("Launching new bootstrap node", "args", bootstrapNodeArgs)
@@ -178,7 +186,7 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) (services []
 	if err != nil {
 		return nil, errors.Wrap(err, "error calling NewBootstrapNode")
 	}
-	return []job.ServiceCtx{configProvider, job.NewServiceAdapter(bootstrapper)}, nil
+	return []job.ServiceCtx{configProvider, ocrLogger, job.NewServiceAdapter(bootstrapper)}, nil
 }
 
 // AfterJobCreated satisfies the job.Delegate interface.

@@ -1,14 +1,16 @@
-package automationv2_1
+package automation
 
 import (
 	"math/big"
 	"sync"
 
 	"github.com/rs/zerolog"
-	"github.com/smartcontractkit/wasp"
 
-	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/log_emitter"
+	"github.com/smartcontractkit/chainlink-testing-framework/wasp"
+
+	"github.com/smartcontractkit/chainlink-testing-framework/seth"
+
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/shared/generated/log_emitter"
 
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
 )
@@ -24,7 +26,7 @@ type LogTriggerGun struct {
 	data             [][]byte
 	addresses        []string
 	multiCallAddress string
-	evmClient        blockchain.EVMClient
+	client           *seth.Client
 	logger           zerolog.Logger
 }
 
@@ -42,14 +44,14 @@ func generateCallData(int1 int64, int2 int64, count int64) []byte {
 
 func NewLogTriggerUser(
 	logger zerolog.Logger,
-	TriggerConfigs []LogTriggerConfig,
-	evmClient blockchain.EVMClient,
+	triggerConfigs []LogTriggerConfig,
+	client *seth.Client,
 	multicallAddress string,
 ) *LogTriggerGun {
 	var data [][]byte
 	var addresses []string
 
-	for _, c := range TriggerConfigs {
+	for _, c := range triggerConfigs {
 		if c.NumberOfEvents > 0 {
 			d := generateCallData(1, 1, c.NumberOfEvents)
 			data = append(data, d)
@@ -72,7 +74,7 @@ func NewLogTriggerUser(
 		data:             data,
 		logger:           logger,
 		multiCallAddress: multicallAddress,
-		evmClient:        evmClient,
+		client:           client,
 	}
 }
 
@@ -88,17 +90,37 @@ func (m *LogTriggerGun) Call(_ *wasp.Generator) *wasp.Response {
 		}
 		dividedData = append(dividedData, d[i:end])
 	}
+
+	resultCh := make(chan *wasp.Response, len(dividedData))
+
 	for _, a := range dividedData {
 		wg.Add(1)
-		go func(a [][]byte, m *LogTriggerGun) *wasp.Response {
+		go func(a [][]byte, m *LogTriggerGun) {
 			defer wg.Done()
-			_, err := contracts.MultiCallLogTriggerLoadGen(m.evmClient, m.multiCallAddress, m.addresses, a)
+
+			_, err := contracts.MultiCallLogTriggerLoadGen(m.client, m.multiCallAddress, m.addresses, a)
 			if err != nil {
-				return &wasp.Response{Error: err.Error(), Failed: true}
+				m.logger.Error().Err(err).Msg("Error calling MultiCallLogTriggerLoadGen")
+				resultCh <- &wasp.Response{Error: err.Error(), Failed: true}
+				return
 			}
-			return &wasp.Response{}
+			resultCh <- &wasp.Response{}
 		}(a, m)
 	}
 	wg.Wait()
-	return &wasp.Response{}
+	close(resultCh)
+
+	r := &wasp.Response{}
+	for result := range resultCh {
+		if result.Failed {
+			r.Failed = true
+			if r.Error != "" {
+				r.Error += "; " + result.Error
+			} else {
+				r.Error = result.Error
+			}
+		}
+	}
+
+	return r
 }

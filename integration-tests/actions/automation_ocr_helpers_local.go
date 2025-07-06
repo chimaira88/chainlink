@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	tc "github.com/smartcontractkit/chainlink/integration-tests/testconfig"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/lib/pq"
 	"github.com/rs/zerolog"
@@ -18,7 +20,7 @@ import (
 	ocr2keepers20config "github.com/smartcontractkit/chainlink-automation/pkg/v2/config"
 	ocr2keepers30config "github.com/smartcontractkit/chainlink-automation/pkg/v3/config"
 
-	"github.com/smartcontractkit/chainlink/integration-tests/client"
+	"github.com/smartcontractkit/chainlink/deployment/environment/nodeclient"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts/ethereum"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
@@ -26,9 +28,64 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
 )
 
+func ReadRegistryConfig(c tc.AutomationTestConfig) contracts.KeeperRegistrySettings {
+	registrySettings := c.GetAutomationConfig().AutomationConfig.RegistrySettings
+	return contracts.KeeperRegistrySettings{
+		PaymentPremiumPPB:    *registrySettings.PaymentPremiumPPB,
+		FlatFeeMicroLINK:     *registrySettings.FlatFeeMicroLINK,
+		CheckGasLimit:        *registrySettings.CheckGasLimit,
+		StalenessSeconds:     registrySettings.StalenessSeconds,
+		GasCeilingMultiplier: *registrySettings.GasCeilingMultiplier,
+		MinUpkeepSpend:       registrySettings.MinUpkeepSpend,
+		MaxPerformGas:        *registrySettings.MaxPerformGas,
+		FallbackGasPrice:     registrySettings.FallbackGasPrice,
+		FallbackLinkPrice:    registrySettings.FallbackLinkPrice,
+		FallbackNativePrice:  registrySettings.FallbackNativePrice,
+		MaxCheckDataSize:     *registrySettings.MaxCheckDataSize,
+		MaxPerformDataSize:   *registrySettings.MaxPerformDataSize,
+		MaxRevertDataSize:    *registrySettings.MaxRevertDataSize,
+	}
+}
+
+func ReadPluginConfig(c tc.AutomationTestConfig) ocr2keepers30config.OffchainConfig {
+	plCfg := c.GetAutomationConfig().AutomationConfig.PluginConfig
+	return ocr2keepers30config.OffchainConfig{
+		TargetProbability:    *plCfg.TargetProbability,
+		TargetInRounds:       *plCfg.TargetInRounds,
+		PerformLockoutWindow: *plCfg.PerformLockoutWindow,
+		GasLimitPerReport:    *plCfg.GasLimitPerReport,
+		GasOverheadPerUpkeep: *plCfg.GasOverheadPerUpkeep,
+		MinConfirmations:     *plCfg.MinConfirmations,
+		MaxUpkeepBatchSize:   *plCfg.MaxUpkeepBatchSize,
+		LogProviderConfig: ocr2keepers30config.LogProviderConfig{
+			BlockRate: *plCfg.LogProviderConfig.BlockRate,
+			LogLimit:  *plCfg.LogProviderConfig.LogLimit,
+		},
+	}
+}
+
+func ReadPublicConfig(c tc.AutomationTestConfig) ocr3.PublicConfig {
+	pubCfg := c.GetAutomationConfig().AutomationConfig.PublicConfig
+	return ocr3.PublicConfig{
+		DeltaProgress:                           *pubCfg.DeltaProgress,
+		DeltaResend:                             *pubCfg.DeltaResend,
+		DeltaInitial:                            *pubCfg.DeltaInitial,
+		DeltaRound:                              *pubCfg.DeltaRound,
+		DeltaGrace:                              *pubCfg.DeltaGrace,
+		DeltaCertifiedCommitRequest:             *pubCfg.DeltaCertifiedCommitRequest,
+		DeltaStage:                              *pubCfg.DeltaStage,
+		RMax:                                    *pubCfg.RMax,
+		MaxDurationQuery:                        *pubCfg.MaxDurationQuery,
+		MaxDurationObservation:                  *pubCfg.MaxDurationObservation,
+		MaxDurationShouldAcceptAttestedReport:   *pubCfg.MaxDurationShouldAcceptAttestedReport,
+		MaxDurationShouldTransmitAcceptedReport: *pubCfg.MaxDurationShouldTransmitAcceptedReport,
+		F:                                       *pubCfg.F,
+	}
+}
+
 func BuildAutoOCR2ConfigVarsLocal(
 	l zerolog.Logger,
-	chainlinkNodes []*client.ChainlinkClient,
+	chainlinkNodes []*nodeclient.ChainlinkClient,
 	registryConfig contracts.KeeperRegistrySettings,
 	registrar string,
 	deltaStage time.Duration,
@@ -41,7 +98,7 @@ func BuildAutoOCR2ConfigVarsLocal(
 
 func BuildAutoOCR2ConfigVarsWithKeyIndexLocal(
 	l zerolog.Logger,
-	chainlinkNodes []*client.ChainlinkClient,
+	chainlinkNodes []*nodeclient.ChainlinkClient,
 	registryConfig contracts.KeeperRegistrySettings,
 	registrar string,
 	deltaStage time.Duration,
@@ -88,6 +145,7 @@ func BuildAutoOCR2ConfigVarsWithKeyIndexLocal(
 			S,                     // s []int,
 			oracleIdentities,      // oracles []OracleIdentityExtra,
 			offC,                  // reportingPluginConfig []byte,
+			nil,
 			20*time.Millisecond,   // maxDurationQuery time.Duration,
 			20*time.Millisecond,   // maxDurationObservation time.Duration, // good to here
 			1200*time.Millisecond, // maxDurationShouldAcceptAttestedReport time.Duration,
@@ -123,6 +181,7 @@ func BuildAutoOCR2ConfigVarsWithKeyIndexLocal(
 			S,                     // s []int,
 			oracleIdentities,      // oracles []OracleIdentityExtra,
 			offC,                  // reportingPluginConfig []byte,
+			nil,
 			20*time.Millisecond,   // maxDurationQuery time.Duration,
 			20*time.Millisecond,   // maxDurationObservation time.Duration,
 			1200*time.Millisecond, // maxDurationReport time.Duration,
@@ -175,7 +234,7 @@ func BuildAutoOCR2ConfigVarsWithKeyIndexLocal(
 // CreateOCRKeeperJobs bootstraps the first node and to the other nodes sends ocr jobs
 func CreateOCRKeeperJobsLocal(
 	l zerolog.Logger,
-	chainlinkNodes []*client.ChainlinkClient,
+	chainlinkNodes []*nodeclient.ChainlinkClient,
 	registryAddr string,
 	chainID int64,
 	keyIndex int,
@@ -200,7 +259,7 @@ func CreateOCRKeeperJobsLocal(
 		return fmt.Errorf("v2.0, v2.1, and v2.2 are the only supported versions")
 	}
 
-	bootstrapSpec := &client.OCR2TaskJobSpec{
+	bootstrapSpec := &nodeclient.OCR2TaskJobSpec{
 		Name:    "ocr2 bootstrap node " + registryAddr,
 		JobType: "bootstrap",
 		OCR2OracleSpec: job.OCR2OracleSpec{
@@ -238,7 +297,7 @@ func CreateOCRKeeperJobsLocal(
 			}
 		}
 
-		autoOCR2JobSpec := client.OCR2TaskJobSpec{
+		autoOCR2JobSpec := nodeclient.OCR2TaskJobSpec{
 			Name:    "ocr2 " + registryAddr,
 			JobType: "offchainreporting2",
 			OCR2OracleSpec: job.OCR2OracleSpec{

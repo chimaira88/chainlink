@@ -1,14 +1,17 @@
 package api
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/hex"
+	"github.com/smartcontractkit/chainlink-evm/pkg/keys"
 	gw_common "github.com/smartcontractkit/chainlink/v2/core/services/gateway/common"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
@@ -21,6 +24,7 @@ const (
 	MessageDonIdMaxLen            = 64
 	MessageReceiverLen            = 2 + 2*20
 	NullChar                      = "\x00"
+	MethodInternalError           = "internal_error"
 )
 
 /*
@@ -93,7 +97,7 @@ func (m *Message) Sign(privateKey *ecdsa.PrivateKey) error {
 	if m == nil {
 		return errors.New("nil message")
 	}
-	rawData := getRawMessageBody(&m.Body)
+	rawData := GetRawMessageBody(&m.Body)
 	signature, err := gw_common.SignData(privateKey, rawData...)
 	if err != nil {
 		return err
@@ -103,11 +107,25 @@ func (m *Message) Sign(privateKey *ecdsa.PrivateKey) error {
 	return nil
 }
 
+func (m *Message) SignKS(ctx context.Context, ks keys.MessageSigner, signer common.Address) error {
+	if m == nil {
+		return errors.New("nil message")
+	}
+	rawData := GetRawMessageBody(&m.Body)
+	signature, err := ks.SignMessage(ctx, signer, gw_common.Flatten(rawData...))
+	if err != nil {
+		return err
+	}
+	m.Signature = utils.StringToHex(string(signature))
+	m.Body.Sender = strings.ToLower(signer.Hex())
+	return nil
+}
+
 func (m *Message) ExtractSigner() (signerAddress []byte, err error) {
 	if m == nil {
 		return nil, errors.New("nil message")
 	}
-	rawData := getRawMessageBody(&m.Body)
+	rawData := GetRawMessageBody(&m.Body)
 	signatureBytes, err := hex.DecodeString(m.Signature)
 	if err != nil {
 		return nil, err
@@ -115,7 +133,7 @@ func (m *Message) ExtractSigner() (signerAddress []byte, err error) {
 	return gw_common.ExtractSigner(signatureBytes, rawData...)
 }
 
-func getRawMessageBody(msgBody *MessageBody) [][]byte {
+func GetRawMessageBody(msgBody *MessageBody) [][]byte {
 	alignedMessageId := make([]byte, MessageIdMaxLen)
 	copy(alignedMessageId, msgBody.MessageId)
 	alignedMethod := make([]byte, MessageMethodMaxLen)

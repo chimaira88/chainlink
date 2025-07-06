@@ -10,26 +10,25 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 	"github.com/onsi/gomega"
 	"github.com/pkg/errors"
 	"github.com/shopspring/decimal"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v4"
 
-	"github.com/jmoiron/sqlx"
-
 	"github.com/smartcontractkit/chainlink-common/pkg/assets"
 	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
-	txmgrcommon "github.com/smartcontractkit/chainlink/v2/common/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/log"
-	logmocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/log/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/flux_aggregator_wrapper"
+	"github.com/smartcontractkit/chainlink-common/pkg/utils/tests"
+
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/flux_aggregator_wrapper"
+	"github.com/smartcontractkit/chainlink-evm/pkg/log"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	txmgrcommon "github.com/smartcontractkit/chainlink-framework/chains/txmgr"
+	logmocks "github.com/smartcontractkit/chainlink/v2/common/log/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest/heavyweight"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/pgtest"
@@ -42,6 +41,7 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ethkey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
 	pipelinemocks "github.com/smartcontractkit/chainlink/v2/core/services/pipeline/mocks"
+	"github.com/smartcontractkit/chainlink/v2/core/utils/testutils/heavyweight"
 )
 
 const oracleCount uint8 = 17
@@ -150,7 +150,7 @@ type setupOptions struct {
 // functional options to configure the setup
 func setup(t *testing.T, ds sqlutil.DataSource, optionFns ...func(*setupOptions)) (*fluxmonitorv2.FluxMonitor, *testMocks) {
 	t.Helper()
-	testutils.SkipShort(t, "long test")
+	tests.SkipShort(t, "long test")
 
 	tm := setupMocks(t)
 	options := setupOptions{
@@ -491,7 +491,7 @@ func TestFluxMonitor_PollIfEligible(t *testing.T) {
 
 			oracles := []common.Address{nodeAddr, testutils.NewAddress()}
 			tm.fluxAggregator.On("GetOracles", nilOpts).Return(oracles, nil)
-			require.NoError(t, fm.SetOracleAddress())
+			require.NoError(t, fm.SetOracleAddress(t.Context()))
 			fm.ExportedPollIfEligible(thresholds.rel, thresholds.abs)
 		})
 	}
@@ -526,7 +526,7 @@ func TestFluxMonitor_PollIfEligible_Creates_JobErr(t *testing.T) {
 		Once()
 
 	tm.fluxAggregator.On("GetOracles", nilOpts).Return(oracles, nil)
-	require.NoError(t, fm.SetOracleAddress())
+	require.NoError(t, fm.SetOracleAddress(t.Context()))
 
 	fm.ExportedPollIfEligible(1, 1)
 }
@@ -621,7 +621,7 @@ func TestPollingDeviationChecker_BuffersLogs(t *testing.T) {
 			mock.Anything,
 			contractAddress,
 			uint32(1),
-			mock.AnythingOfType("int64"), //int64(1),
+			mock.AnythingOfType("int64"), // int64(1),
 			mock.Anything,
 		).
 		Return(nil).Once()
@@ -660,7 +660,7 @@ func TestPollingDeviationChecker_BuffersLogs(t *testing.T) {
 			mock.Anything,
 			contractAddress,
 			uint32(3),
-			mock.AnythingOfType("int64"), //int64(2),
+			mock.AnythingOfType("int64"), // int64(2),
 			mock.Anything,
 		).
 		Return(nil).Once()
@@ -699,7 +699,7 @@ func TestPollingDeviationChecker_BuffersLogs(t *testing.T) {
 			mock.Anything,
 			contractAddress,
 			uint32(4),
-			mock.AnythingOfType("int64"), //int64(3),
+			mock.AnythingOfType("int64"), // int64(3),
 			mock.Anything,
 		).
 		Return(nil).
@@ -784,7 +784,7 @@ func TestFluxMonitor_TriggerIdleTimeThreshold(t *testing.T) {
 			}
 
 			require.NoError(t, fm.Start(testutils.Context(t)))
-			require.Len(t, idleDurationOccured, 0, "no Job Runs created")
+			require.Empty(t, idleDurationOccured, "no Job Runs created")
 
 			if tc.expectedToSubmit {
 				g.Eventually(func() int { return len(idleDurationOccured) }, testutils.WaitTimeout(t)).Should(gomega.Equal(1))
@@ -817,7 +817,7 @@ func TestFluxMonitor_TriggerIdleTimeThreshold(t *testing.T) {
 			fm.Close()
 
 			if !tc.expectedToSubmit {
-				require.Len(t, idleDurationOccured, 0)
+				require.Empty(t, idleDurationOccured)
 			}
 		})
 	}
@@ -1068,7 +1068,7 @@ func TestFluxMonitor_IdleTimerResetsOnNewRound(t *testing.T) {
 		}, nil).Once().Run(func(args mock.Arguments) {
 		initialPollOccurred <- struct{}{}
 	})
-	require.Len(t, idleDurationOccured, 0, "no Job Runs created")
+	require.Empty(t, idleDurationOccured, "no Job Runs created")
 	g.Eventually(func() int { return len(initialPollOccurred) }, testutils.WaitTimeout(t)).Should(gomega.Equal(1))
 
 	// idleDuration 1 triggers using the same round id as the initial poll. This resets the idle timer
@@ -1171,7 +1171,7 @@ func TestFluxMonitor_RoundTimeoutCausesPoll_timesOutAtZero(t *testing.T) {
 	tm.fluxAggregator.On("Address").Return(common.Address{})
 	tm.fluxAggregator.On("GetOracles", nilOpts).Return(oracles, nil)
 
-	require.NoError(t, fm.SetOracleAddress())
+	require.NoError(t, fm.SetOracleAddress(t.Context()))
 	fm.ExportedRoundState(t)
 	servicetest.Run(t, fm)
 
@@ -1307,7 +1307,7 @@ func TestFluxMonitor_UsesPreviousRoundStateOnStartup_IdleTimer(t *testing.T) {
 
 			servicetest.Run(t, fm)
 
-			assert.Eventually(t, func() bool { return len(initialPollOccurred) == 1 }, 3*time.Second, 10*time.Millisecond)
+			require.Eventually(t, func() bool { return len(initialPollOccurred) == 1 }, 3*time.Second, 10*time.Millisecond)
 
 			if tc.expectedToSubmit {
 				g.Eventually(chRoundState).Should(gomega.BeClosed())
@@ -1506,7 +1506,7 @@ func TestFluxMonitor_DoesNotDoubleSubmit(t *testing.T) {
 			Return(nil)
 
 		tm.fluxAggregator.On("GetOracles", nilOpts).Return(oracles, nil)
-		require.NoError(t, fm.SetOracleAddress())
+		require.NoError(t, fm.SetOracleAddress(t.Context()))
 
 		tm.fluxAggregator.On("LatestRoundData", nilOpts).Return(flux_aggregator_wrapper.LatestRoundData{
 			Answer:    big.NewInt(10),
@@ -1635,7 +1635,7 @@ func TestFluxMonitor_DoesNotDoubleSubmit(t *testing.T) {
 			Once()
 
 		tm.fluxAggregator.On("GetOracles", nilOpts).Return(oracles, nil)
-		require.NoError(t, fm.SetOracleAddress())
+		require.NoError(t, fm.SetOracleAddress(t.Context()))
 		fm.ExportedPollIfEligible(0, 0)
 
 		// Now fire off the NewRound log and ensure it does not respond this time
@@ -1732,7 +1732,7 @@ func TestFluxMonitor_DoesNotDoubleSubmit(t *testing.T) {
 			Once()
 
 		tm.fluxAggregator.On("GetOracles", nilOpts).Return(oracles, nil)
-		require.NoError(t, fm.SetOracleAddress())
+		require.NoError(t, fm.SetOracleAddress(t.Context()))
 		fm.ExportedPollIfEligible(0, 0)
 
 		// Now fire off the NewRound log and ensure it does not respond this time
@@ -1813,6 +1813,10 @@ func TestFluxMonitor_DoesNotDoubleSubmit(t *testing.T) {
 	})
 }
 
+// This is a flaky test: inserting time.Sleep(15 * time.Second) in its end makes it failing with an unexpected call.
+// For now, we let it use a custom EventuallyExpectationsMet instead of assert.Eventually because it flakes
+// with the latter approach (somehow assert.Eventually gives it a little bit more time, and then it fails
+// with the same unexpected call).
 func TestFluxMonitor_DrumbeatTicker(t *testing.T) {
 	t.Parallel()
 
@@ -1925,9 +1929,39 @@ func TestFluxMonitor_DrumbeatTicker(t *testing.T) {
 
 	waitTime := 15 * time.Second
 	interval := 50 * time.Millisecond
-	cltest.EventuallyExpectationsMet(t, tm.logBroadcaster, waitTime, interval)
-	cltest.EventuallyExpectationsMet(t, tm.fluxAggregator, waitTime, interval)
-	cltest.EventuallyExpectationsMet(t, tm.orm, waitTime, interval)
-	cltest.EventuallyExpectationsMet(t, tm.pipelineORM, waitTime, interval)
-	cltest.EventuallyExpectationsMet(t, tm.contractSubmitter, waitTime, interval)
+	eventuallyExpectationsMet(t, tm.logBroadcaster, waitTime, interval)
+	eventuallyExpectationsMet(t, tm.fluxAggregator, waitTime, interval)
+	eventuallyExpectationsMet(t, tm.orm, waitTime, interval)
+	eventuallyExpectationsMet(t, tm.pipelineORM, waitTime, interval)
+	eventuallyExpectationsMet(t, tm.contractSubmitter, waitTime, interval)
+}
+
+type testifyExpectationsAsserter interface {
+	AssertExpectations(t mock.TestingT) bool
+}
+
+type fakeT struct{}
+
+func (ft fakeT) Logf(format string, args ...interface{})   {}
+func (ft fakeT) Errorf(format string, args ...interface{}) {}
+func (ft fakeT) FailNow()                                  {}
+
+func eventuallyExpectationsMet(t *testing.T, mock testifyExpectationsAsserter, timeout time.Duration, interval time.Duration) {
+	t.Helper()
+
+	chTimeout := time.After(timeout)
+	for {
+		var ft fakeT
+		success := mock.AssertExpectations(ft)
+		if success {
+			return
+		}
+		select {
+		case <-chTimeout:
+			mock.AssertExpectations(t)
+			t.FailNow()
+		default:
+			time.Sleep(interval)
+		}
+	}
 }

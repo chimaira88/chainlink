@@ -1,6 +1,8 @@
 package job
 
 import (
+	"context"
+	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
@@ -16,15 +18,17 @@ import (
 
 	commonassets "github.com/smartcontractkit/chainlink-common/pkg/assets"
 	"github.com/smartcontractkit/chainlink-common/pkg/types"
+	"github.com/smartcontractkit/chainlink-common/pkg/workflows/sdk"
 
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/config/toml"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
 	clnull "github.com/smartcontractkit/chainlink/v2/core/null"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay"
 	"github.com/smartcontractkit/chainlink/v2/core/services/signatures/secp256k1"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
 	"github.com/smartcontractkit/chainlink/v2/core/utils/stringutils"
@@ -36,6 +40,7 @@ const (
 	BlockhashStore          Type = (Type)(pipeline.BlockhashStoreJobType)
 	Bootstrap               Type = (Type)(pipeline.BootstrapJobType)
 	Cron                    Type = (Type)(pipeline.CronJobType)
+	CCIP                    Type = (Type)(pipeline.CCIPJobType)
 	DirectRequest           Type = (Type)(pipeline.DirectRequestJobType)
 	FluxMonitor             Type = (Type)(pipeline.FluxMonitorJobType)
 	Gateway                 Type = (Type)(pipeline.GatewayJobType)
@@ -48,6 +53,7 @@ const (
 	VRF                     Type = (Type)(pipeline.VRFJobType)
 	Webhook                 Type = (Type)(pipeline.WebhookJobType)
 	Workflow                Type = (Type)(pipeline.WorkflowJobType)
+	StandardCapabilities    Type = (Type)(pipeline.StandardCapabilitiesJobType)
 )
 
 //revive:disable:redefines-builtin-id
@@ -75,6 +81,7 @@ var (
 		BlockhashStore:          false,
 		Bootstrap:               false,
 		Cron:                    true,
+		CCIP:                    false,
 		DirectRequest:           true,
 		FluxMonitor:             true,
 		Gateway:                 false,
@@ -87,12 +94,14 @@ var (
 		VRF:                     true,
 		Webhook:                 true,
 		Workflow:                false,
+		StandardCapabilities:    false,
 	}
 	supportsAsync = map[Type]bool{
 		BlockHeaderFeeder:       false,
 		BlockhashStore:          false,
 		Bootstrap:               false,
 		Cron:                    true,
+		CCIP:                    false,
 		DirectRequest:           true,
 		FluxMonitor:             false,
 		Gateway:                 false,
@@ -105,12 +114,14 @@ var (
 		VRF:                     true,
 		Webhook:                 true,
 		Workflow:                false,
+		StandardCapabilities:    false,
 	}
 	schemaVersions = map[Type]uint32{
 		BlockHeaderFeeder:       1,
 		BlockhashStore:          1,
 		Bootstrap:               1,
 		Cron:                    1,
+		CCIP:                    1,
 		DirectRequest:           1,
 		FluxMonitor:             1,
 		Gateway:                 1,
@@ -123,6 +134,7 @@ var (
 		VRF:                     1,
 		Webhook:                 1,
 		Workflow:                1,
+		StandardCapabilities:    1,
 	}
 )
 
@@ -150,6 +162,7 @@ type Job struct {
 	BlockhashStoreSpec            *BlockhashStoreSpec
 	BlockHeaderFeederSpecID       *int32
 	BlockHeaderFeederSpec         *BlockHeaderFeederSpec
+	BALSpecID                     *int32
 	LegacyGasStationServerSpecID  *int32
 	LegacyGasStationServerSpec    *LegacyGasStationServerSpec
 	LegacyGasStationSidecarSpecID *int32
@@ -166,6 +179,11 @@ type Job struct {
 	PipelineSpec                  *pipeline.Spec
 	WorkflowSpecID                *int32
 	WorkflowSpec                  *WorkflowSpec
+	StandardCapabilitiesSpecID    *int32
+	StandardCapabilitiesSpec      *StandardCapabilitiesSpec
+	CCIPSpecID                    *int32
+	CCIPSpec                      *CCIPSpec
+	CCIPBootstrapSpecID           *int32
 	JobSpecErrors                 []SpecError
 	Type                          Type          `toml:"type"`
 	SchemaVersion                 uint32        `toml:"schemaVersion"`
@@ -241,7 +259,7 @@ type PipelineRun struct {
 }
 
 func (pr PipelineRun) GetID() string {
-	return fmt.Sprintf("%v", pr.ID)
+	return strconv.FormatInt(pr.ID, 10)
 }
 
 func (pr *PipelineRun) SetID(value string) error {
@@ -277,7 +295,7 @@ type OCROracleSpec struct {
 
 // GetID is a getter function that returns the ID of the spec.
 func (s OCROracleSpec) GetID() string {
-	return fmt.Sprintf("%v", s.ID)
+	return strconv.Itoa(int(s.ID))
 }
 
 // SetID is a setter function that sets the ID of the spec.
@@ -342,7 +360,7 @@ type ocr2Config interface {
 	SimulateTransactions() bool
 }
 
-var ForwardersSupportedPlugins = []types.OCR2PluginType{types.Median, types.DKG, types.OCR2VRF, types.OCR2Keeper, types.Functions}
+var ForwardersSupportedPlugins = []types.OCR2PluginType{types.Median, types.OCR2Keeper, types.Functions}
 
 // OCR2OracleSpec defines the job spec for OCR2 jobs.
 // Relay config is chain specific config for a relay (chain adapter).
@@ -369,11 +387,14 @@ type OCR2OracleSpec struct {
 	UpdatedAt                         time.Time            `toml:"-"`
 	CaptureEATelemetry                bool                 `toml:"captureEATelemetry"`
 	CaptureAutomationCustomTelemetry  bool                 `toml:"captureAutomationCustomTelemetry"`
+	// AllowNoBootstrappers is a flag that allows the job to start without any bootstrappers
+	// This is useful for testing and deployments where the node is not configured to conduct consensus (i.e. f = 0 and n = 1).
+	AllowNoBootstrappers bool `toml:"allowNoBootstrappers"`
 }
 
 func validateRelayID(id types.RelayID) error {
 	// only the EVM has specific requirements
-	if id.Network == types.NetworkEVM {
+	if id.Network == relay.NetworkEVM {
 		_, err := toml.ChainIDInt64(id.ChainID)
 		if err != nil {
 			return fmt.Errorf("invalid EVM chain id %s: %w", id.ChainID, err)
@@ -404,10 +425,9 @@ func (s *OCR2OracleSpec) getChainID() (string, error) {
 }
 
 func (s *OCR2OracleSpec) getChainIdFromRelayConfig() (string, error) {
-
 	v, exists := s.RelayConfig["chainID"]
 	if !exists {
-		return "", fmt.Errorf("chainID does not exist")
+		return "", errors.New("chainID does not exist")
 	}
 	switch t := v.(type) {
 	case string:
@@ -426,7 +446,7 @@ func (s *OCR2OracleSpec) getChainIdFromRelayConfig() (string, error) {
 
 // GetID is a getter function that returns the ID of the spec.
 func (s OCR2OracleSpec) GetID() string {
-	return fmt.Sprintf("%v", s.ID)
+	return strconv.Itoa(int(s.ID))
 }
 
 // SetID is a setter function that sets the ID of the spec.
@@ -455,7 +475,7 @@ type WebhookSpec struct {
 }
 
 func (w WebhookSpec) GetID() string {
-	return fmt.Sprintf("%v", w.ID)
+	return strconv.Itoa(int(w.ID))
 }
 
 func (w *WebhookSpec) SetID(value string) error {
@@ -481,12 +501,13 @@ type DirectRequestSpec struct {
 type CronSpec struct {
 	ID           int32     `toml:"-"`
 	CronSchedule string    `toml:"schedule"`
+	EVMChainID   *big.Big  `toml:"evmChainID"`
 	CreatedAt    time.Time `toml:"-"`
 	UpdatedAt    time.Time `toml:"-"`
 }
 
 func (s CronSpec) GetID() string {
-	return fmt.Sprintf("%v", s.ID)
+	return strconv.Itoa(int(s.ID))
 }
 
 func (s *CronSpec) SetID(value string) error {
@@ -793,7 +814,7 @@ type GatewaySpec struct {
 }
 
 func (s GatewaySpec) GetID() string {
-	return fmt.Sprintf("%v", s.ID)
+	return strconv.Itoa(int(s.ID))
 }
 
 func (s *GatewaySpec) SetID(value string) error {
@@ -803,6 +824,22 @@ func (s *GatewaySpec) SetID(value string) error {
 	}
 	s.ID = int32(ID)
 	return nil
+}
+
+// AuthGatewayID returns AuthGatewayId or empty string, if not found or it's not a string
+func (s *GatewaySpec) AuthGatewayID() string {
+	// not using config.GatewayConfig directly to avoid import cycle
+	if nsc, ok := s.GatewayConfig["ConnectionManagerConfig"]; ok {
+		if nscMap, ok := nsc.(map[string]interface{}); ok {
+			if authGatewayID, ok := nscMap["AuthGatewayId"]; ok {
+				if authGatewayIDStr, ok := authGatewayID.(string); ok {
+					return authGatewayIDStr
+				}
+			}
+		}
+	}
+
+	return ""
 }
 
 // EALSpec defines the job spec for the gas station.
@@ -841,28 +878,221 @@ type LiquidityBalancerSpec struct {
 	LiquidityBalancerConfig string `toml:"liquidityBalancerConfig" db:"liquidity_balancer_config"`
 }
 
-type WorkflowSpec struct {
-	ID            int32     `toml:"-"`
-	WorkflowID    string    `toml:"workflowId"`
-	Workflow      string    `toml:"workflow"`
-	WorkflowOwner string    `toml:"workflowOwner"`
-	CreatedAt     time.Time `toml:"-"`
-	UpdatedAt     time.Time `toml:"-"`
-}
+type WorkflowSpecType string
 
 const (
-	workflowIDLen    = 64
-	workflowOwnerLen = 40
+	YamlSpec        WorkflowSpecType = "yaml"
+	WASMFile        WorkflowSpecType = "wasm_file"
+	DefaultSpecType                  = ""
 )
 
-func (w *WorkflowSpec) Validate() error {
-	if len(w.WorkflowID) != workflowIDLen {
-		return fmt.Errorf("incorrect length for id %s: expected %d, got %d", w.WorkflowID, workflowIDLen, len(w.WorkflowID))
+type WorkflowSpecStatus string
+
+const (
+	WorkflowSpecStatusActive  WorkflowSpecStatus = "active"
+	WorkflowSpecStatusPaused  WorkflowSpecStatus = "paused"
+	WorkflowSpecStatusDefault WorkflowSpecStatus = ""
+)
+
+type WorkflowSpec struct {
+	ID       int32  `toml:"-"`
+	Workflow string `toml:"workflow"`           // the raw representation of the workflow
+	Config   string `toml:"config" db:"config"` // the raw representation of the config
+	// fields derived from the yaml spec, used for indexing the database
+	// note: i tried to make these private, but translating them to the database seems to require them to be public
+	WorkflowID    string             `toml:"-" db:"workflow_id"` // Derived. Do not modify. the CID of the workflow.
+	WorkflowOwner string             `toml:"workflow_owner" db:"workflow_owner"`
+	WorkflowName  string             `toml:"workflow_name" db:"workflow_name"`
+	Status        WorkflowSpecStatus `db:"status"`
+	BinaryURL     string             `db:"binary_url"`
+	ConfigURL     string             `db:"config_url"`
+	SecretsID     sql.NullInt64      `db:"secrets_id"`
+	CreatedAt     time.Time          `toml:"-"`
+	UpdatedAt     time.Time          `toml:"-"`
+	SpecType      WorkflowSpecType   `toml:"spec_type" db:"spec_type"`
+	sdkWorkflow   *sdk.WorkflowSpec
+	rawSpec       []byte
+	config        []byte
+}
+
+var (
+	ErrInvalidWorkflowID       = errors.New("invalid workflow id")
+	ErrInvalidWorkflowYAMLSpec = errors.New("invalid workflow yaml spec")
+)
+
+const (
+	workflowIDLen = 64 // sha256 hash
+)
+
+// Validate checks the workflow spec for correctness
+func (w *WorkflowSpec) Validate(ctx context.Context) error {
+	s, err := w.SDKSpec(ctx)
+	if err != nil {
+		return err
 	}
 
-	if len(w.WorkflowOwner) != workflowOwnerLen {
-		return fmt.Errorf("incorrect length for owner %s: expected %d, got %d", w.WorkflowOwner, workflowOwnerLen, len(w.WorkflowOwner))
+	// For yaml-based workflow specs, use the owner & name fields defined there.
+	// For wasm workflows, use the `workflow_name` & `workflow_owner` fields directly from the job spec.
+	if s.Owner+s.Name != "" {
+		w.WorkflowOwner = strings.TrimPrefix(s.Owner, "0x") // the json schema validation ensures it is a hex string with 0x prefix, but the database does not store the prefix
+		w.WorkflowName = s.Name
+	} else {
+		w.WorkflowOwner = strings.TrimPrefix(w.WorkflowOwner, "0x")
+	}
+
+	if len(w.WorkflowID) != workflowIDLen {
+		return fmt.Errorf("%w: incorrect length for id %s: expected %d, got %d", ErrInvalidWorkflowID, w.WorkflowID, workflowIDLen, len(w.WorkflowID))
 	}
 
 	return nil
+}
+
+func (w *WorkflowSpec) SDKSpec(ctx context.Context) (sdk.WorkflowSpec, error) {
+	if w.sdkWorkflow != nil {
+		return *w.sdkWorkflow, nil
+	}
+
+	workflowSpecFactory, ok := workflowSpecFactories[w.SpecType]
+	if !ok {
+		return sdk.WorkflowSpec{}, fmt.Errorf("unknown spec type %s", w.SpecType)
+	}
+	spec, rawSpec, cid, err := workflowSpecFactory.Spec(ctx, w.Workflow, w.Config)
+	if err != nil {
+		return sdk.WorkflowSpec{}, fmt.Errorf("spec factory failed: %w", err)
+	}
+	w.sdkWorkflow = &spec
+	w.rawSpec = rawSpec
+	w.WorkflowID = cid
+	return spec, nil
+}
+
+func (w *WorkflowSpec) RawSpec(ctx context.Context) ([]byte, error) {
+	if w.rawSpec != nil {
+		return w.rawSpec, nil
+	}
+
+	workflowSpecFactory, ok := workflowSpecFactories[w.SpecType]
+	if !ok {
+		return nil, fmt.Errorf("unknown spec type %s", w.SpecType)
+	}
+
+	rs, err := workflowSpecFactory.RawSpec(ctx, w.Workflow, w.Config)
+	if err != nil {
+		return nil, err
+	}
+
+	w.rawSpec = rs
+	return rs, nil
+}
+
+func (w *WorkflowSpec) GetConfig(ctx context.Context) ([]byte, error) {
+	if w.config != nil {
+		return w.config, nil
+	}
+
+	workflowSpecFactory, ok := workflowSpecFactories[w.SpecType]
+	if !ok {
+		return nil, fmt.Errorf("unknown spec type %s", w.SpecType)
+	}
+
+	rs, err := workflowSpecFactory.Config(ctx, w.Config)
+	if err != nil {
+		return nil, err
+	}
+
+	w.config = rs
+	return rs, nil
+}
+
+type OracleFactoryConfig struct {
+	Enabled            bool     `toml:"enabled"`
+	BootstrapPeers     []string `toml:"bootstrap_peers"`      // e.g.,["12D3KooWEBVwbfdhKnicois7FTYVsBFGFcoMhMCKXQC57BQyZMhz@localhost:6690"]
+	OCRContractAddress string   `toml:"ocr_contract_address"` // e.g., 0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6
+	ChainID            string   `toml:"chain_id"`             // e.g., "31337"
+	Network            string   `toml:"network"`              // e.g., "evm"
+}
+
+// Value returns this instance serialized for database storage.
+func (ofc OracleFactoryConfig) Value() (driver.Value, error) {
+	return json.Marshal(ofc)
+}
+
+// Scan reads the database value and returns an instance.
+func (ofc *OracleFactoryConfig) Scan(value interface{}) error {
+	if value == nil {
+		return nil // field is nullable
+	}
+
+	b, ok := value.([]byte)
+	if !ok {
+		return errors.Errorf("expected bytes got %T", value)
+	}
+	return json.Unmarshal(b, &ofc)
+}
+
+type StandardCapabilitiesSpec struct {
+	ID            int32
+	CreatedAt     time.Time           `toml:"-"`
+	UpdatedAt     time.Time           `toml:"-"`
+	Command       string              `toml:"command" db:"command"`
+	Config        string              `toml:"config" db:"config"`
+	OracleFactory OracleFactoryConfig `toml:"oracle_factory" db:"oracle_factory"`
+}
+
+func (w *StandardCapabilitiesSpec) GetID() string {
+	return strconv.Itoa(int(w.ID))
+}
+
+func (w *StandardCapabilitiesSpec) SetID(value string) error {
+	ID, err := strconv.ParseInt(value, 10, 32)
+	if err != nil {
+		return err
+	}
+	w.ID = int32(ID)
+	return nil
+}
+
+type CCIPSpec struct {
+	ID        int32
+	CreatedAt time.Time `toml:"-"`
+	UpdatedAt time.Time `toml:"-"`
+
+	// P2PV2Bootstrappers is a list of "peer_id@ip_address:port" strings that are used to
+	// identify the bootstrap nodes of the P2P network.
+	// These bootstrappers will be used to bootstrap all CCIP DONs.
+	P2PV2Bootstrappers pq.StringArray `toml:"p2pV2Bootstrappers" db:"p2pv2_bootstrappers"`
+
+	// CapabilityVersion is the semantic version of the CCIP capability.
+	// This capability version must exist in the onchain capability registry.
+	CapabilityVersion string `toml:"capabilityVersion" db:"capability_version"`
+
+	// CapabilityLabelledName is the labelled name of the CCIP capability.
+	// Corresponds to the labelled name of the capability in the onchain capability registry.
+	CapabilityLabelledName string `toml:"capabilityLabelledName" db:"capability_labelled_name"`
+
+	// OCRKeyBundleIDs is a mapping from chain type to OCR key bundle ID.
+	// These are explicitly specified here so that we don't run into strange errors auto-detecting
+	// the valid bundle, since nops can create as many bundles as they want.
+	// This will most likely never change for a particular CCIP capability version,
+	// since new chain families will likely require a new capability version.
+	// {"evm": "evm_key_bundle_id", "solana": "solana_key_bundle_id", ... }
+	OCRKeyBundleIDs JSONConfig `toml:"ocrKeyBundleIDs" db:"ocr_key_bundle_ids"`
+
+	// RelayConfigs consists of relay specific configuration.
+	// Chain reader configurations are stored here, and are defined on a chain family basis, e.g
+	// we will have one chain reader config for EVM, one for solana, starknet, etc.
+	// Chain writer configurations are also stored here, and are also defined on a chain family basis,
+	// e.g we will have one chain writer config for EVM, one for solana, starknet, etc.
+	// See tests for examples of relay configs in TOML.
+	// { "evm": {"chainReader": {...}, "chainWriter": {...}}, "solana": {...}, ... }
+	// see core/services/relay/evm/types/types.go for EVM configs.
+	RelayConfigs JSONConfig `toml:"relayConfigs" db:"relay_configs"`
+
+	// P2PKeyID is the ID of the P2P key of the node.
+	// This must be present in the capability registry otherwise the job will not start correctly.
+	P2PKeyID string `toml:"p2pKeyID" db:"p2p_key_id"`
+
+	// PluginConfig contains plugin-specific config, like token price pipelines
+	// and RMN network info for offchain blessing.
+	PluginConfig JSONConfig `toml:"pluginConfig"`
 }

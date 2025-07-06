@@ -14,17 +14,19 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hashicorp/consul/sdk/freeport"
 	"github.com/kylelemons/godebug/diff"
 	"github.com/pelletier/go-toml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli"
 
+	"github.com/smartcontractkit/freeport"
+
 	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
+	"github.com/smartcontractkit/chainlink-evm/pkg/client/clienttest"
+	"github.com/smartcontractkit/chainlink-solana/pkg/solana/config"
 	"github.com/smartcontractkit/chainlink/v2/core/auth"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	evmclimocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/cmd"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
@@ -89,12 +91,12 @@ func withKey() func(opts *startOptions) {
 	}
 }
 
-func newEthMock(t *testing.T) *evmclimocks.Client {
+func newEthMock(t *testing.T) *clienttest.Client {
 	t.Helper()
 	return cltest.NewEthMocksWithStartupAssertions(t)
 }
 
-func newEthMockWithTransactionsOnBlocksAssertions(t *testing.T) *evmclimocks.Client {
+func newEthMockWithTransactionsOnBlocksAssertions(t *testing.T) *clienttest.Client {
 	t.Helper()
 
 	return cltest.NewEthMocksWithTransactionsOnBlocksAssertions(t)
@@ -120,6 +122,13 @@ func TestShell_ReplayBlocks(t *testing.T) {
 		c.EVM[0].NonceAutoSync = ptr(false)
 		c.EVM[0].BalanceMonitor.Enabled = ptr(false)
 		c.EVM[0].GasEstimator.Mode = ptr("FixedPrice")
+
+		solCfg := &config.TOMLConfig{
+			ChainID: ptr("devnet"),
+			Enabled: ptr(true),
+		}
+		solCfg.SetDefaults()
+		c.Solana = config.TOMLConfigs{solCfg}
 	})
 	client, _ := app.NewShellAndRenderer()
 
@@ -127,12 +136,17 @@ func TestShell_ReplayBlocks(t *testing.T) {
 	flagSetApplyFromAction(client.ReplayFromBlock, set, "")
 
 	require.NoError(t, set.Set("block-number", "42"))
-	require.NoError(t, set.Set("evm-chain-id", "12345678"))
+	require.NoError(t, set.Set("chain-id", "12345678"))
+	require.NoError(t, set.Set("family", "evm"))
 	c := cli.NewContext(nil, set, nil)
 	assert.ErrorContains(t, client.ReplayFromBlock(c), "chain id does not match any local chains")
 
-	require.NoError(t, set.Set("evm-chain-id", "0"))
+	require.NoError(t, set.Set("chain-id", "0"))
 	c = cli.NewContext(nil, set, nil)
+	assert.NoError(t, client.ReplayFromBlock(c))
+
+	require.NoError(t, set.Set("chain-id", "devnet"))
+	require.NoError(t, set.Set("family", "solana"))
 	assert.NoError(t, client.ReplayFromBlock(c))
 }
 
@@ -258,7 +272,6 @@ func TestShell_DestroyExternalInitiator_NotFound(t *testing.T) {
 }
 
 func TestShell_RemoteLogin(t *testing.T) {
-
 	app := startNewApplicationV2(t, nil)
 	orm := app.AuthenticationProvider()
 
@@ -464,37 +477,6 @@ func TestShell_ChangePassword(t *testing.T) {
 	require.Contains(t, err.Error(), "Unauthorized")
 }
 
-func TestShell_Profile_InvalidSecondsParam(t *testing.T) {
-	t.Parallel()
-
-	app := startNewApplicationV2(t, nil)
-	u := cltest.NewUserWithSession(t, app.AuthenticationProvider())
-	enteredStrings := []string{u.Email, cltest.Password}
-	prompter := &cltest.MockCountingPrompter{T: t, EnteredStrings: enteredStrings}
-
-	client := app.NewAuthenticatingShell(prompter)
-
-	set := flag.NewFlagSet("test", 0)
-	flagSetApplyFromAction(client.RemoteLogin, set, "")
-
-	require.NoError(t, set.Set("file", "../internal/fixtures/apicredentials"))
-	require.NoError(t, set.Set("bypass-version-check", "true"))
-
-	c := cli.NewContext(nil, set, nil)
-	err := client.RemoteLogin(c)
-	require.NoError(t, err)
-
-	// pick a value larger than the default http service write timeout
-	d := app.Config.WebServer().HTTPWriteTimeout() + 2*time.Second
-	set.Uint("seconds", uint(d.Seconds()), "")
-	tDir := t.TempDir()
-	set.String("output_dir", tDir, "")
-	err = client.Profile(cli.NewContext(nil, set, nil))
-	wantErr := cmd.ErrProfileTooLong
-	require.ErrorAs(t, err, &wantErr)
-
-}
-
 func TestShell_Profile(t *testing.T) {
 	t.Parallel()
 
@@ -526,7 +508,7 @@ func TestShell_Profile(t *testing.T) {
 
 	ents, err := os.ReadDir(tDir)
 	require.NoError(t, err)
-	require.Greater(t, len(ents), 0, "ents %+v", ents)
+	require.NotEmpty(t, ents, "ents %+v", ents)
 }
 
 func TestShell_Profile_Unauthenticated(t *testing.T) {

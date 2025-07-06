@@ -13,12 +13,10 @@ import (
 	"go.uber.org/multierr"
 	"go.uber.org/zap/zapcore"
 
-	coscfg "github.com/smartcontractkit/chainlink-cosmos/pkg/cosmos/config"
-	"github.com/smartcontractkit/chainlink-solana/pkg/solana"
-	starknet "github.com/smartcontractkit/chainlink-starknet/relayer/pkg/chainlink/config"
-
 	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
-	evmcfg "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
+	solcfg "github.com/smartcontractkit/chainlink-solana/pkg/solana/config"
+
+	evmcfg "github.com/smartcontractkit/chainlink-evm/pkg/config/toml"
 	"github.com/smartcontractkit/chainlink/v2/core/config"
 	coreconfig "github.com/smartcontractkit/chainlink/v2/core/config"
 	"github.com/smartcontractkit/chainlink/v2/core/config/env"
@@ -135,7 +133,7 @@ func (o GeneralConfigOpts) New() (GeneralConfig, error) {
 		return nil, err
 	}
 
-	_, warning := utils.MultiErrorList(o.Config.warnings())
+	_, warning := commonconfig.MultiErrorList(o.Config.warnings())
 
 	o.Config.setDefaults()
 	if !o.SkipEnv {
@@ -194,19 +192,34 @@ func (o *GeneralConfigOpts) parse() (err error) {
 }
 
 func (g *generalConfig) EVMConfigs() evmcfg.EVMConfigs {
+	if g.c.EVM == nil {
+		return evmcfg.EVMConfigs{} // return empty to pass nil check
+	}
 	return g.c.EVM
 }
 
-func (g *generalConfig) CosmosConfigs() coscfg.TOMLConfigs {
+func (g *generalConfig) CosmosConfigs() RawConfigs {
 	return g.c.Cosmos
 }
 
-func (g *generalConfig) SolanaConfigs() solana.TOMLConfigs {
+func (g *generalConfig) SolanaConfigs() solcfg.TOMLConfigs {
 	return g.c.Solana
 }
 
-func (g *generalConfig) StarknetConfigs() starknet.TOMLConfigs {
+func (g *generalConfig) StarknetConfigs() RawConfigs {
 	return g.c.Starknet
+}
+
+func (g *generalConfig) AptosConfigs() RawConfigs {
+	return g.c.Aptos
+}
+
+func (g *generalConfig) TronConfigs() RawConfigs {
+	return g.c.Tron
+}
+
+func (g *generalConfig) TONConfigs() RawConfigs {
+	return g.c.TON
 }
 
 func (g *generalConfig) Validate() error {
@@ -220,7 +233,7 @@ func (g *generalConfig) validate(secretsValidationFn func() error) error {
 		secretsValidationFn(),
 	)
 
-	_, errList := utils.MultiErrorList(err)
+	_, errList := commonconfig.MultiErrorList(err)
 	return errList
 }
 
@@ -235,7 +248,7 @@ var emptyStringsEnv string
 func validateEnv() (err error) {
 	defer func() {
 		if err != nil {
-			_, err = utils.MultiErrorList(err)
+			_, err = commonconfig.MultiErrorList(err)
 			err = fmt.Errorf("invalid environment: %w", err)
 		}
 	}()
@@ -250,7 +263,7 @@ func validateEnv() (err error) {
 		k := kv[:i]
 		_, ok := os.LookupEnv(k)
 		if ok {
-			err = multierr.Append(err, fmt.Errorf("environment variable %s must not be set: %v", k, v2.ErrUnsupported))
+			err = multierr.Append(err, fmt.Errorf("environment variable %s must not be set: %w", k, v2.ErrUnsupported))
 		}
 	}
 	return
@@ -299,23 +312,7 @@ func (g *generalConfig) AutoPprof() config.AutoPprof {
 }
 
 func (g *generalConfig) EVMEnabled() bool {
-	for _, c := range g.c.EVM {
-		if c.IsEnabled() {
-			return true
-		}
-	}
-	return false
-}
-
-func (g *generalConfig) EVMRPCEnabled() bool {
-	for _, c := range g.c.EVM {
-		if c.IsEnabled() {
-			if len(c.Nodes) > 0 {
-				return true
-			}
-		}
-	}
-	return false
+	return g.c.EVM.Enabled()
 }
 
 func (g *generalConfig) SolanaEnabled() bool {
@@ -338,6 +335,33 @@ func (g *generalConfig) CosmosEnabled() bool {
 
 func (g *generalConfig) StarkNetEnabled() bool {
 	for _, c := range g.c.Starknet {
+		if c.IsEnabled() {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *generalConfig) AptosEnabled() bool {
+	for _, c := range g.c.Aptos {
+		if c.IsEnabled() {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *generalConfig) TronEnabled() bool {
+	for _, c := range g.c.Tron {
+		if c.IsEnabled() {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *generalConfig) TONEnabled() bool {
+	for _, c := range g.c.TON {
 		if c.IsEnabled() {
 			return true
 		}
@@ -401,6 +425,10 @@ func (g *generalConfig) Capabilities() config.Capabilities {
 	return &capabilitiesConfig{c: g.c.Capabilities}
 }
 
+func (g *generalConfig) Workflows() config.Workflows {
+	return &workflowsConfig{c: g.c.Workflows}
+}
+
 func (g *generalConfig) Database() coreconfig.Database {
 	return &databaseConfig{c: g.c.Database, s: g.secrets.Secrets.Database, logSQL: g.logSQL}
 }
@@ -415,6 +443,10 @@ func (g *generalConfig) FluxMonitor() config.FluxMonitor {
 
 func (g *generalConfig) InsecureFastScrypt() bool {
 	return *g.c.InsecureFastScrypt
+}
+
+func (g *generalConfig) InsecurePPROFHeap() bool {
+	return *g.c.InsecurePPROFHeap
 }
 
 func (g *generalConfig) JobPipelineReaperInterval() time.Duration {
@@ -508,8 +540,26 @@ func (g *generalConfig) Threshold() coreconfig.Threshold {
 	return &thresholdConfig{s: g.secrets.Threshold}
 }
 
+func (g *generalConfig) ImportedEthKeys() coreconfig.ImportableEthKeyLister {
+	return &importedEthKeyConfigs{s: g.secrets.EVM}
+}
+func (g *generalConfig) ImportedP2PKey() coreconfig.ImportableKey {
+	return &importedP2PKeyConfig{s: g.secrets.P2PKey}
+}
+
 func (g *generalConfig) Tracing() coreconfig.Tracing {
 	return &tracingConfig{s: g.c.Tracing}
+}
+func (g *generalConfig) Telemetry() coreconfig.Telemetry {
+	return &telemetryConfig{s: g.c.Telemetry}
+}
+
+func (g *generalConfig) CRE() coreconfig.CRE {
+	return &creConfig{s: g.secrets.CRE, c: g.c.CRE}
+}
+
+func (g *generalConfig) Billing() coreconfig.Billing {
+	return &billingConfig{t: g.c.Billing}
 }
 
 var zeroSha256Hash = models.Sha256Hash{}

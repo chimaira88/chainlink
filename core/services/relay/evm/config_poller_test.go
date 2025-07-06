@@ -8,11 +8,11 @@ import (
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind/backends"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
+	"github.com/ethereum/go-ethereum/ethclient/simulated"
 	"github.com/onsi/gomega"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
@@ -27,24 +27,25 @@ import (
 	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 	ocrtypes2 "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	evmClientMocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller/mocks"
-	evmutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/link_token_interface"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/link_token_interface"
+	"github.com/smartcontractkit/chainlink-evm/pkg/client"
+	evmclient "github.com/smartcontractkit/chainlink-evm/pkg/client"
+	"github.com/smartcontractkit/chainlink-evm/pkg/client/clienttest"
+	"github.com/smartcontractkit/chainlink-evm/pkg/heads/headstest"
+	"github.com/smartcontractkit/chainlink-evm/pkg/logpoller"
+	evmutils "github.com/smartcontractkit/chainlink-evm/pkg/utils"
+	"github.com/smartcontractkit/chainlink/v2/common/logpoller/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/pgtest"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/testhelpers"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
 func TestConfigPoller(t *testing.T) {
-	lggr := logger.TestLogger(t)
+	lggr := logger.Test(t)
 	var ethClient *client.SimulatedBackendClient
 	var lp logpoller.LogPoller
 	var ocrAddress common.Address
@@ -52,7 +53,8 @@ func TestConfigPoller(t *testing.T) {
 	var configStoreContractAddr common.Address
 	var configStoreContract *ocrconfigurationstoreevmsimple.OCRConfigurationStoreEVMSimple
 	var user *bind.TransactOpts
-	var b *backends.SimulatedBackend
+	var b *simulated.Backend
+	var ec simulated.Client
 	var linkTokenAddress common.Address
 	var accessAddress common.Address
 	ctx := testutils.Context(t)
@@ -64,16 +66,18 @@ func TestConfigPoller(t *testing.T) {
 		require.NoError(t, err)
 		user, err = bind.NewKeyedTransactorWithChainID(key, big.NewInt(1337))
 		require.NoError(t, err)
-		b = backends.NewSimulatedBackend(core.GenesisAlloc{
+		b = simulated.NewBackend(types.GenesisAlloc{
 			user.From: {Balance: big.NewInt(1000000000000000000)}},
-			5*ethconfig.Defaults.Miner.GasCeil)
-		linkTokenAddress, _, _, err = link_token_interface.DeployLinkToken(user, b)
+			simulated.WithBlockGasLimit(5*ethconfig.Defaults.Miner.GasCeil))
+		require.NotNil(t, b)
+		ec = b.Client()
+		linkTokenAddress, _, _, err = link_token_interface.DeployLinkToken(user, ec)
 		require.NoError(t, err)
-		accessAddress, _, _, err = testoffchainaggregator2.DeploySimpleWriteAccessController(user, b)
+		accessAddress, _, _, err = testoffchainaggregator2.DeploySimpleWriteAccessController(user, ec)
 		require.NoError(t, err, "failed to deploy test access controller contract")
 		ocrAddress, _, ocrContract, err = ocr2aggregator.DeployOCR2Aggregator(
 			user,
-			b,
+			ec,
 			linkTokenAddress,
 			big.NewInt(0),
 			big.NewInt(10),
@@ -83,7 +87,7 @@ func TestConfigPoller(t *testing.T) {
 			"TEST",
 		)
 		require.NoError(t, err)
-		configStoreContractAddr, _, configStoreContract, err = ocrconfigurationstoreevmsimple.DeployOCRConfigurationStoreEVMSimple(user, b)
+		configStoreContractAddr, _, configStoreContract, err = ocrconfigurationstoreevmsimple.DeployOCRConfigurationStoreEVMSimple(user, ec)
 		require.NoError(t, err)
 		b.Commit()
 
@@ -96,10 +100,11 @@ func TestConfigPoller(t *testing.T) {
 			PollPeriod:               100 * time.Millisecond,
 			FinalityDepth:            1,
 			BackfillBatchSize:        2,
-			RpcBatchSize:             2,
+			RPCBatchSize:             2,
 			KeepFinalizedBlocksDepth: 1000,
 		}
-		lp = logpoller.NewLogPoller(lorm, ethClient, lggr, lpOpts)
+		ht := headstest.NewSimulatedHeadTracker(ethClient, lpOpts.UseFinalityTag, lpOpts.FinalityDepth)
+		lp = logpoller.NewLogPoller(lorm, ethClient, lggr, ht, lpOpts)
 		servicetest.Run(t, lp)
 	}
 
@@ -133,7 +138,7 @@ func TestConfigPoller(t *testing.T) {
 			DeltaC:              10,
 		}, ocrContract, user)
 		b.Commit()
-		latest, err := b.BlockByNumber(testutils.Context(t), nil)
+		latest, err := ec.BlockByNumber(testutils.Context(t), nil)
 		require.NoError(t, err)
 		// Ensure we capture this config set log.
 		require.NoError(t, lp.Replay(testutils.Context(t), latest.Number().Int64()-1))
@@ -164,7 +169,7 @@ func TestConfigPoller(t *testing.T) {
 		var err error
 		ocrAddress, _, ocrContract, err = ocr2aggregator.DeployOCR2Aggregator(
 			user,
-			b,
+			ec,
 			linkTokenAddress,
 			big.NewInt(0),
 			big.NewInt(10),
@@ -207,7 +212,7 @@ func TestConfigPoller(t *testing.T) {
 				changedInBlock, configDigest, err := cp.LatestConfigDetails(testutils.Context(t))
 				require.NoError(t, err)
 
-				latest, err := b.BlockByNumber(testutils.Context(t), nil)
+				latest, err := ec.BlockByNumber(testutils.Context(t), nil)
 				require.NoError(t, err)
 
 				onchainDetails, err := ocrContract.LatestConfigDetails(nil)
@@ -218,7 +223,7 @@ func TestConfigPoller(t *testing.T) {
 			})
 		})
 		t.Run("returns error if callLatestConfigDetails fails", func(t *testing.T) {
-			failingClient := new(evmClientMocks.Client)
+			failingClient := new(clienttest.Client)
 			failingClient.On("ConfiguredChainID").Return(big.NewInt(42))
 			failingClient.On("CallContract", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("something exploded"))
 			cp, err := newConfigPoller(ctx, lggr, failingClient, mp, ocrAddress, &configStoreContractAddr, ld)
@@ -239,7 +244,7 @@ func TestConfigPoller(t *testing.T) {
 		// deploy it again to reset to empty config
 		ocrAddress, _, ocrContract, err = ocr2aggregator.DeployOCR2Aggregator(
 			user,
-			b,
+			ec,
 			linkTokenAddress,
 			big.NewInt(0),
 			big.NewInt(10),
@@ -316,7 +321,7 @@ func TestConfigPoller(t *testing.T) {
 			})
 		})
 		t.Run("returns error if callReadConfig fails", func(t *testing.T) {
-			failingClient := new(evmClientMocks.Client)
+			failingClient := new(clienttest.Client)
 			failingClient.On("ConfiguredChainID").Return(big.NewInt(42))
 			failingClient.On("CallContract", mock.Anything, mock.MatchedBy(func(callArgs ethereum.CallMsg) bool {
 				// initial call to retrieve config store address from aggregator
@@ -361,6 +366,7 @@ func setConfig(t *testing.T, pluginConfig median.OffchainConfig, ocrContract *oc
 		[]int{1, 1, 1, 1},
 		oracles,
 		pluginConfig.Encode(),
+		nil,
 		50*time.Millisecond,
 		50*time.Millisecond,
 		50*time.Millisecond,
@@ -387,7 +393,6 @@ func setConfig(t *testing.T, pluginConfig median.OffchainConfig, ocrContract *oc
 }
 
 func addConfig(t *testing.T, user *bind.TransactOpts, configStoreContract *ocrconfigurationstoreevmsimple.OCRConfigurationStoreEVMSimple, config ocrconfigurationstoreevmsimple.OCRConfigurationStoreEVMSimpleConfigurationEVMSimple) {
-
 	_, err := configStoreContract.AddConfig(user, config)
 	require.NoError(t, err)
 }

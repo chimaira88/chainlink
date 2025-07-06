@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	clhttp "github.com/smartcontractkit/chainlink-common/pkg/http"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/jsonserializable"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
@@ -27,7 +28,6 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
-	clhttp "github.com/smartcontractkit/chainlink/v2/core/utils/http"
 )
 
 // ethUSDPairing has the ETH/USD parameters needed when POSTing to the price
@@ -192,7 +192,6 @@ func TestHTTPTask_Variables(t *testing.T) {
 				if test.expectedErrorContains != "" {
 					require.Contains(t, result.Error.Error(), test.expectedErrorContains)
 				}
-
 			} else {
 				require.NoError(t, result.Error)
 				require.NotNil(t, result.Value)
@@ -229,8 +228,8 @@ func TestHTTPTask_OverrideURLSafe(t *testing.T) {
 		RequestData: ethUSDPairing,
 	}
 	// Use real clients here to actually test the local connection blocking
-	r := clhttp.NewRestrictedHTTPClient(config.Database(), logger.TestLogger(t))
-	u := clhttp.NewUnrestrictedHTTPClient()
+	r := clhttp.NewRestrictedClient(config.Database(), logger.TestLogger(t))
+	u := clhttp.NewUnrestrictedClient()
 	task.HelperSetDependencies(config.JobPipeline(), r, u)
 
 	result, runInfo := task.Run(testutils.Context(t), logger.TestLogger(t), pipeline.NewVarsFrom(nil), nil)
@@ -362,7 +361,7 @@ func TestHTTPTask_Headers(t *testing.T) {
 		result, runInfo := task.Run(testutils.Context(t), logger.TestLogger(t), pipeline.NewVarsFrom(nil), nil)
 		assert.False(t, runInfo.IsPending)
 		assert.Equal(t, `{"fooresponse": 1}`, result.Value)
-		assert.Nil(t, result.Error)
+		assert.NoError(t, result.Error)
 
 		assert.Equal(t, append(standardHeaders, "X-Header-1", "foo", "X-Header-2", "bar"), allHeaders(headers))
 	})
@@ -377,7 +376,7 @@ func TestHTTPTask_Headers(t *testing.T) {
 
 		result, runInfo := task.Run(testutils.Context(t), logger.TestLogger(t), pipeline.NewVarsFrom(nil), nil)
 		assert.False(t, runInfo.IsPending)
-		assert.NotNil(t, result.Error)
+		assert.Error(t, result.Error)
 		assert.Equal(t, `headers must have an even number of elements`, result.Error.Error())
 		assert.Nil(t, result.Value)
 	})
@@ -408,7 +407,7 @@ func TestHTTPTask_Headers(t *testing.T) {
 		result, runInfo := task.Run(testutils.Context(t), logger.TestLogger(t), pipeline.NewVarsFrom(nil), nil)
 		assert.False(t, runInfo.IsPending)
 		assert.Equal(t, `{"fooresponse": 3}`, result.Value)
-		assert.Nil(t, result.Error)
+		assert.NoError(t, result.Error)
 
 		assert.Equal(t, []string{"Content-Length", "38", "Content-Type", "footype", "User-Agent", "Go-http-client/1.1", "X-Header-1", "foo", "X-Header-2", "bar"}, allHeaders(headers))
 	})

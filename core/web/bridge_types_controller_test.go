@@ -258,7 +258,7 @@ func TestBridgeTypesController_Update_Success(t *testing.T) {
 	require.NoError(t, app.BridgeORM().CreateBridgeType(ctx, bt))
 
 	body := fmt.Sprintf(`{"name": "%s","url":"http://yourbridge"}`, bridgeName)
-	ud := bytes.NewBuffer([]byte(body))
+	ud := bytes.NewBufferString(body)
 	resp, cleanup := client.Patch("/v2/bridge_types/"+bridgeName, ud)
 	t.Cleanup(cleanup)
 	cltest.AssertServerResponse(t, resp, http.StatusOK)
@@ -289,7 +289,7 @@ func TestBridgeController_Show(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "Response should be successful")
 
 	var resource presenters.BridgeResource
-	require.NoError(t, cltest.ParseJSONAPIResponse(t, resp, &resource))
+	cltest.ParseJSONAPIResponse(t, resp, &resource)
 	assert.Equal(t, bt.Name.String(), resource.Name, "should have the same name")
 	assert.Equal(t, bt.URL.String(), resource.URL, "should have the same URL")
 	assert.Equal(t, bt.Confirmations, resource.Confirmations, "should have the same Confirmations")

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	pkgerrors "github.com/pkg/errors"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
@@ -274,13 +275,13 @@ func (o *orm) UpdateRole(ctx context.Context, email, newRole string) (sessions.U
 
 		_, err = tx.ExecContext(ctx, "DELETE FROM sessions WHERE email = lower($1)", email)
 		if err != nil {
-			o.lggr.Errorf("Failed to purge user sessions for UpdateRole", "err", err)
+			o.lggr.Errorw("Failed to purge user sessions for UpdateRole", "err", err)
 			return pkgerrors.New("error updating API user")
 		}
 
 		sql := "UPDATE users SET role = $1, updated_at = now() WHERE lower(email) = lower($2) RETURNING *"
 		if err := tx.GetContext(ctx, &userToEdit, sql, userToEdit.Role, email); err != nil {
-			o.lggr.Errorf("Error updating API user", "err", err)
+			o.lggr.Errorw("Error updating API user", "err", err)
 			return pkgerrors.New("error updating API user")
 		}
 
@@ -364,4 +365,8 @@ func (o *orm) FindExternalInitiator(
 	exi := &bridges.ExternalInitiator{}
 	err := o.ds.GetContext(ctx, exi, `SELECT * FROM external_initiators WHERE access_key = $1`, eia.AccessKey)
 	return exi, err
+}
+
+func (o *orm) ExtendRouter(r *gin.RouterGroup) error {
+	return nil
 }

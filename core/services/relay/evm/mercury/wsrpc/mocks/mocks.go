@@ -3,7 +3,7 @@ package mocks
 import (
 	"context"
 
-	"github.com/smartcontractkit/wsrpc/connectivity"
+	grpc_connectivity "google.golang.org/grpc/connectivity"
 
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc/pb"
 )
@@ -29,15 +29,21 @@ func (m *MockWSRPCClient) ServerURL() string { return "mock server url" }
 func (m *MockWSRPCClient) RawClient() pb.MercuryClient { return nil }
 
 type MockConn struct {
-	State  connectivity.State
-	Ready  bool
-	Closed bool
+	State   grpc_connectivity.State
+	Ready   bool
+	Closed  bool
+	InvokeF func(ctx context.Context, method string, args interface{}, reply interface{}) error
 }
 
-func (m *MockConn) Close() {
+func (m *MockConn) Close() error {
 	m.Closed = true
+	return nil
 }
 func (m MockConn) WaitForReady(ctx context.Context) bool {
 	return m.Ready
 }
-func (m MockConn) GetState() connectivity.State { return m.State }
+func (m MockConn) GetState() grpc_connectivity.State { return m.State }
+
+func (m MockConn) Invoke(ctx context.Context, method string, args interface{}, reply interface{}) error {
+	return m.InvokeF(ctx, method, args, reply)
+}

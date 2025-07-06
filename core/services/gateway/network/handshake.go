@@ -1,6 +1,7 @@
 package network
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -21,17 +22,14 @@ import (
 //	ChallengeResponse()
 //	             ---------response--------->
 //	                                     FinalizeHandshake()
-//
-//go:generate mockery --quiet --name ConnectionInitiator --output ./mocks/ --case=underscore
 type ConnectionInitiator interface {
 	// Generate authentication header value specific to node and gateway
-	NewAuthHeader(url *url.URL) ([]byte, error)
+	NewAuthHeader(ctx context.Context, url *url.URL) ([]byte, error)
 
 	// Sign challenge to prove identity.
-	ChallengeResponse(url *url.URL, challenge []byte) ([]byte, error)
+	ChallengeResponse(ctx context.Context, url *url.URL, challenge []byte) ([]byte, error)
 }
 
-//go:generate mockery --quiet --name ConnectionAcceptor --output ./mocks/ --case=underscore
 type ConnectionAcceptor interface {
 	// Verify auth header, save state of the attempt and generate a challenge for the node.
 	StartHandshake(authHeader []byte) (attemptId string, challenge []byte, err error)

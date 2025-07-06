@@ -6,12 +6,9 @@ import (
 	"time"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
 // KVStore is a simple KV store that can store and retrieve serializable data.
-//
-//go:generate mockery --quiet --name KVStore --output ./mocks/ --case=underscore
 type KVStore interface {
 	Store(ctx context.Context, key string, val []byte) error
 	Get(ctx context.Context, key string) ([]byte, error)
@@ -20,23 +17,19 @@ type KVStore interface {
 type kVStore struct {
 	jobID int32
 	ds    sqlutil.DataSource
-	lggr  logger.SugaredLogger
 }
 
 var _ KVStore = (*kVStore)(nil)
 
-func NewKVStore(jobID int32, ds sqlutil.DataSource, lggr logger.Logger) kVStore {
-	namedLogger := logger.Sugared(lggr.Named("JobORM"))
+func NewKVStore(jobID int32, ds sqlutil.DataSource) kVStore {
 	return kVStore{
 		jobID: jobID,
 		ds:    ds,
-		lggr:  namedLogger,
 	}
 }
 
 // Store saves []byte value by key.
 func (kv kVStore) Store(ctx context.Context, key string, val []byte) error {
-
 	sql := `INSERT INTO job_kv_store (job_id, key, val_bytea)
        	 	VALUES ($1, $2, $3)
         	ON CONFLICT (job_id, key) DO UPDATE SET

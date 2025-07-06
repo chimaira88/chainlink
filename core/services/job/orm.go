@@ -12,25 +12,25 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/jackc/pgconn"
+	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
 
-	"github.com/jmoiron/sqlx"
-
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
 	"github.com/smartcontractkit/chainlink-common/pkg/types"
-
+	evmconfig "github.com/smartcontractkit/chainlink-evm/pkg/config"
+	evmkeystore "github.com/smartcontractkit/chainlink-evm/pkg/keys"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	evmconfig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
 	"github.com/smartcontractkit/chainlink/v2/core/config"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/null"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
 	medianconfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/median/config"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
 )
 
@@ -41,20 +41,17 @@ var (
 	ErrNoSuchPublicKey      = errors.New("no such public key exists")
 )
 
-//go:generate mockery --quiet --name ORM --output ./mocks/ --case=underscore
-
 type ORM interface {
 	InsertWebhookSpec(ctx context.Context, webhookSpec *WebhookSpec) error
 	InsertJob(ctx context.Context, job *Job) error
 	CreateJob(ctx context.Context, jb *Job) error
 	FindJobs(ctx context.Context, offset, limit int) ([]Job, int, error)
-	FindJobTx(ctx context.Context, id int32) (Job, error)
 	FindJob(ctx context.Context, id int32) (Job, error)
 	FindJobByExternalJobID(ctx context.Context, uuid uuid.UUID) (Job, error)
 	FindJobIDByAddress(ctx context.Context, address evmtypes.EIP55Address, evmChainID *big.Big) (int32, error)
 	FindOCR2JobIDByAddress(ctx context.Context, contractID string, feedID *common.Hash) (int32, error)
 	FindJobIDsWithBridge(ctx context.Context, name string) ([]int32, error)
-	DeleteJob(ctx context.Context, id int32) error
+	DeleteJob(ctx context.Context, id int32, jobType Type) error
 	RecordError(ctx context.Context, jobID int32, description string) error
 	// TryRecordError is a helper which calls RecordError and logs the returned error if present.
 	TryRecordError(ctx context.Context, jobID int32, description string)
@@ -78,6 +75,14 @@ type ORM interface {
 
 	DataSource() sqlutil.DataSource
 	WithDataSource(source sqlutil.DataSource) ORM
+
+	FindJobIDByWorkflow(ctx context.Context, spec WorkflowSpec) (int32, error)
+	// TODO rename function to indicate it is CCIP-specific, not generic?
+	FindJobIDByCapabilityNameAndVersion(ctx context.Context, spec CCIPSpec) (int32, error)
+	FindStandardCapabilityJobID(ctx context.Context, spec StandardCapabilitiesSpec) (int32, error)
+	FindGatewayJobID(ctx context.Context, spec GatewaySpec) (int32, error)
+
+	FindJobIDByStreamID(ctx context.Context, streamID uint32) (int32, error)
 }
 
 type ORMConfig interface {
@@ -278,16 +283,74 @@ func (o *orm) CreateJob(ctx context.Context, jb *Job) error {
 
 			if jb.OCR2OracleSpec.PluginType == types.Median {
 				var cfg medianconfig.PluginConfig
-				err2 := json.Unmarshal(jb.OCR2OracleSpec.PluginConfig.Bytes(), &cfg)
-				if err2 != nil {
-					return errors.Wrap(err2, "failed to parse plugin config")
+
+				validatePipeline := func(p string) error {
+					pipeline, pipelineErr := pipeline.Parse(p)
+					if pipelineErr != nil {
+						return pipelineErr
+					}
+					return tx.AssertBridgesExist(ctx, *pipeline)
 				}
-				feePipeline, err2 := pipeline.Parse(cfg.JuelsPerFeeCoinPipeline)
-				if err2 != nil {
-					return err2
+
+				errUnmarshal := json.Unmarshal(jb.OCR2OracleSpec.PluginConfig.Bytes(), &cfg)
+				if errUnmarshal != nil {
+					return errors.Wrap(errUnmarshal, "failed to parse plugin config")
 				}
-				if err2 = tx.AssertBridgesExist(ctx, *feePipeline); err2 != nil {
-					return err2
+
+				if errFeePipeline := validatePipeline(cfg.JuelsPerFeeCoinPipeline); errFeePipeline != nil {
+					return errFeePipeline
+				}
+
+				if cfg.HasGasPriceSubunitsPipeline() {
+					if errGasPipeline := validatePipeline(cfg.GasPriceSubunitsPipeline); errGasPipeline != nil {
+						return errGasPipeline
+					}
+				}
+			}
+
+			if enableDualTransmission, ok := jb.OCR2OracleSpec.RelayConfig["enableDualTransmission"]; ok && enableDualTransmission != nil {
+				if jb.OCR2OracleSpec.Relay != relay.NetworkEVM {
+					return errors.New("dual transmission is enabled only for EVM")
+				}
+
+				rawDualTransmissionConfig, ok := jb.OCR2OracleSpec.RelayConfig["dualTransmission"]
+				if !ok {
+					return errors.New("dual transmission is enabled but no dual transmission config present")
+				}
+
+				dualTransmissionConfig, ok := rawDualTransmissionConfig.(map[string]interface{})
+				if !ok {
+					return errors.New("invalid dual transmission config")
+				}
+
+				dtContractAddress, ok := dualTransmissionConfig["contractAddress"].(string)
+				if !ok || !common.IsHexAddress(dtContractAddress) {
+					return errors.New("invalid contract address in dual transmission config")
+				}
+
+				dtTransmitterAddress, ok := dualTransmissionConfig["transmitterAddress"].(string)
+				if !ok || !common.IsHexAddress(dtTransmitterAddress) {
+					return errors.New("invalid transmitter address in dual transmission config")
+				}
+
+				if _, ok := dualTransmissionConfig["meta"].(map[string]interface{}); !ok {
+					return errors.New("invalid dual transmission meta")
+				}
+
+				if err = validateKeyStoreMatchForRelay(ctx, jb.OCR2OracleSpec.Relay, tx.keyStore, dtTransmitterAddress); err != nil {
+					return errors.Wrap(err, "unknown dual transmission transmitterAddress")
+				}
+
+				// Check if secondary transmitter address is used as primary somewhere else
+				if checkIfKeyHasLock(ctx, tx.keyStore.Eth(), common.HexToAddress(dtTransmitterAddress), evmkeystore.TXMv1) {
+					return errors.Errorf("key %s cannot be a secondary transmitter address because it's used a primary transmitter in another job", dtTransmitterAddress)
+				}
+			}
+
+			// Check if primary transmitter address is used as secondary somewhere else, don't check for mercury as it uses CSA keys for transmitters
+			if jb.OCR2OracleSpec.PluginType != types.Mercury {
+				if checkIfKeyHasLock(ctx, tx.keyStore.Eth(), common.HexToAddress(jb.OCR2OracleSpec.TransmitterID.String), evmkeystore.TXMv2) {
+					return errors.Errorf("key %s cannot be a (primary) transmitter address because it's used a secondary transmitter address in another job", jb.OCR2OracleSpec.TransmitterID.String)
 				}
 			}
 
@@ -395,14 +458,51 @@ func (o *orm) CreateJob(ctx context.Context, jb *Job) error {
 		case Stream:
 			// 'stream' type has no associated spec, nothing to do here
 		case Workflow:
-			sql := `INSERT INTO workflow_specs (workflow, workflow_id, workflow_owner, created_at, updated_at)
-			VALUES (:workflow, :workflow_id, :workflow_owner, NOW(), NOW())
+			sql := `INSERT INTO workflow_specs (workflow, workflow_id, workflow_owner, workflow_name, binary_url, config_url, secrets_id, created_at, updated_at, spec_type, config)
+			VALUES (:workflow, :workflow_id, :workflow_owner, :workflow_name, :binary_url, :config_url, :secrets_id, NOW(), NOW(), :spec_type, :config)
 			RETURNING id;`
 			specID, err := tx.prepareQuerySpecID(ctx, sql, jb.WorkflowSpec)
 			if err != nil {
-				return errors.Wrap(err, "failed to create WorkflowSpec for jobSpec")
+				return fmt.Errorf("failed to create WorkflowSpec for jobSpec given %v: %w", *jb.WorkflowSpec, err)
 			}
 			jb.WorkflowSpecID = &specID
+		case StandardCapabilities:
+			sql := `INSERT INTO standardcapabilities_specs (command, config, oracle_factory, created_at, updated_at)
+			VALUES (:command, :config, :oracle_factory, NOW(), NOW())
+			RETURNING id;`
+			specID, err := tx.prepareQuerySpecID(ctx, sql, jb.StandardCapabilitiesSpec)
+			if err != nil {
+				return errors.Wrap(err, "failed to create StandardCapabilities for jobSpec")
+			}
+			jb.StandardCapabilitiesSpecID = &specID
+		case CCIP:
+			sql := `INSERT INTO ccip_specs (
+				capability_version,
+				capability_labelled_name,
+				ocr_key_bundle_ids,
+				p2p_key_id,
+				p2pv2_bootstrappers,
+				relay_configs,
+				plugin_config,
+				created_at,
+				updated_at
+			) VALUES (
+				:capability_version,
+				:capability_labelled_name,
+				:ocr_key_bundle_ids,
+				:p2p_key_id,
+				:p2pv2_bootstrappers,
+				:relay_configs,
+				:plugin_config,
+				NOW(),
+				NOW()
+			)
+			RETURNING id;`
+			specID, err := tx.prepareQuerySpecID(ctx, sql, jb.CCIPSpec)
+			if err != nil {
+				return errors.Wrap(err, "failed to create CCIPSpec for jobSpec")
+			}
+			jb.CCIPSpecID = &specID
 		default:
 			o.lggr.Panicf("Unsupported jb.Type: %v", jb.Type)
 		}
@@ -462,10 +562,10 @@ func (o *orm) insertOCROracleSpec(ctx context.Context, spec *OCROracleSpec) (spe
 
 func (o *orm) insertOCR2OracleSpec(ctx context.Context, spec *OCR2OracleSpec) (specID int32, err error) {
 	return o.prepareQuerySpecID(ctx, `INSERT INTO ocr2_oracle_specs (contract_id, feed_id, relay, relay_config, plugin_type, plugin_config, onchain_signing_strategy, p2pv2_bootstrappers, ocr_key_bundle_id, transmitter_id,
-					blockchain_timeout, contract_config_tracker_poll_interval, contract_config_confirmations,
+					blockchain_timeout, contract_config_tracker_poll_interval, contract_config_confirmations, allow_no_bootstrappers,
 					created_at, updated_at)
 			VALUES (:contract_id, :feed_id, :relay, :relay_config, :plugin_type, :plugin_config, :onchain_signing_strategy, :p2pv2_bootstrappers, :ocr_key_bundle_id, :transmitter_id,
-					 :blockchain_timeout, :contract_config_tracker_poll_interval, :contract_config_confirmations,
+					 :blockchain_timeout, :contract_config_tracker_poll_interval, :contract_config_confirmations, :allow_no_bootstrappers,
 					NOW(), NOW())
 			RETURNING id;`, spec)
 }
@@ -477,8 +577,8 @@ func (o *orm) insertKeeperSpec(ctx context.Context, spec *KeeperSpec) (specID in
 }
 
 func (o *orm) insertCronSpec(ctx context.Context, spec *CronSpec) (specID int32, err error) {
-	return o.prepareQuerySpecID(ctx, `INSERT INTO cron_specs (cron_schedule, created_at, updated_at)
-			VALUES (:cron_schedule, NOW(), NOW())
+	return o.prepareQuerySpecID(ctx, `INSERT INTO cron_specs (cron_schedule, evm_chain_id, created_at, updated_at)
+			VALUES (:cron_schedule, :evm_chain_id, NOW(), NOW())
 			RETURNING id;`, spec)
 }
 
@@ -556,25 +656,40 @@ func ValidateKeyStoreMatch(ctx context.Context, spec *OCR2OracleSpec, keyStore k
 
 func validateKeyStoreMatchForRelay(ctx context.Context, network string, keyStore keystore.Master, key string) error {
 	switch network {
-	case types.NetworkEVM:
+	case relay.NetworkEVM:
 		_, err := keyStore.Eth().Get(ctx, key)
 		if err != nil {
 			return errors.Errorf("no EVM key matching: %q", key)
 		}
-	case types.NetworkCosmos:
+	case relay.NetworkCosmos:
 		_, err := keyStore.Cosmos().Get(key)
 		if err != nil {
 			return errors.Errorf("no Cosmos key matching: %q", key)
 		}
-	case types.NetworkSolana:
+	case relay.NetworkSolana:
 		_, err := keyStore.Solana().Get(key)
 		if err != nil {
 			return errors.Errorf("no Solana key matching: %q", key)
 		}
-	case types.NetworkStarkNet:
+	case relay.NetworkStarkNet:
 		_, err := keyStore.StarkNet().Get(key)
 		if err != nil {
 			return errors.Errorf("no Starknet key matching: %q", key)
+		}
+	case relay.NetworkAptos:
+		_, err := keyStore.Aptos().Get(key)
+		if err != nil {
+			return errors.Errorf("no Aptos key matching: %q", key)
+		}
+	case relay.NetworkTron:
+		_, err := keyStore.Tron().Get(key)
+		if err != nil {
+			return errors.Errorf("no Tron key matching: %q", key)
+		}
+	case relay.NetworkTON:
+		_, err := keyStore.TON().Get(key)
+		if err != nil {
+			return errors.Errorf("no TON key matching: %q", key)
 		}
 	}
 	return nil
@@ -582,7 +697,7 @@ func validateKeyStoreMatchForRelay(ctx context.Context, network string, keyStore
 
 func areSendingKeysDefined(ctx context.Context, jb *Job, keystore keystore.Master) (bool, error) {
 	if jb.OCR2OracleSpec.RelayConfig["sendingKeys"] != nil {
-		sendingKeys, err := SendingKeysForJob(jb)
+		sendingKeys, err := SendingKeysForJob(jb.OCR2OracleSpec)
 		if err != nil {
 			return false, err
 		}
@@ -615,19 +730,19 @@ func (o *orm) InsertJob(ctx context.Context, job *Job) error {
 		// if job has id, emplace otherwise insert with a new id.
 		if job.ID == 0 {
 			query = `INSERT INTO jobs (name, stream_id, schema_version, type, max_task_duration, ocr_oracle_spec_id, ocr2_oracle_spec_id, direct_request_spec_id, flux_monitor_spec_id,
-				keeper_spec_id, cron_spec_id, vrf_spec_id, webhook_spec_id, blockhash_store_spec_id, bootstrap_spec_id, block_header_feeder_spec_id, gateway_spec_id, 
-                legacy_gas_station_server_spec_id, legacy_gas_station_sidecar_spec_id, workflow_spec_id, external_job_id, gas_limit, forwarding_allowed, created_at)
+				keeper_spec_id, cron_spec_id, vrf_spec_id, webhook_spec_id, blockhash_store_spec_id, bootstrap_spec_id, block_header_feeder_spec_id, gateway_spec_id,
+                legacy_gas_station_server_spec_id, legacy_gas_station_sidecar_spec_id, workflow_spec_id, standard_capabilities_spec_id, ccip_spec_id, external_job_id, gas_limit, forwarding_allowed, created_at)
 		VALUES (:name, :stream_id, :schema_version, :type, :max_task_duration, :ocr_oracle_spec_id, :ocr2_oracle_spec_id, :direct_request_spec_id, :flux_monitor_spec_id,
-				:keeper_spec_id, :cron_spec_id, :vrf_spec_id, :webhook_spec_id, :blockhash_store_spec_id, :bootstrap_spec_id, :block_header_feeder_spec_id, :gateway_spec_id, 
-				:legacy_gas_station_server_spec_id, :legacy_gas_station_sidecar_spec_id, :workflow_spec_id, :external_job_id, :gas_limit, :forwarding_allowed, NOW())
+				:keeper_spec_id, :cron_spec_id, :vrf_spec_id, :webhook_spec_id, :blockhash_store_spec_id, :bootstrap_spec_id, :block_header_feeder_spec_id, :gateway_spec_id,
+				:legacy_gas_station_server_spec_id, :legacy_gas_station_sidecar_spec_id, :workflow_spec_id, :standard_capabilities_spec_id, :ccip_spec_id, :external_job_id, :gas_limit, :forwarding_allowed, NOW())
 		RETURNING *;`
 		} else {
 			query = `INSERT INTO jobs (id, name, stream_id, schema_version, type, max_task_duration, ocr_oracle_spec_id, ocr2_oracle_spec_id, direct_request_spec_id, flux_monitor_spec_id,
-			keeper_spec_id, cron_spec_id, vrf_spec_id, webhook_spec_id, blockhash_store_spec_id, bootstrap_spec_id, block_header_feeder_spec_id, gateway_spec_id, 
-                  legacy_gas_station_server_spec_id, legacy_gas_station_sidecar_spec_id, workflow_spec_id, external_job_id, gas_limit, forwarding_allowed, created_at)
+			keeper_spec_id, cron_spec_id, vrf_spec_id, webhook_spec_id, blockhash_store_spec_id, bootstrap_spec_id, block_header_feeder_spec_id, gateway_spec_id,
+                  legacy_gas_station_server_spec_id, legacy_gas_station_sidecar_spec_id, workflow_spec_id, standard_capabilities_spec_id, ccip_spec_id, external_job_id, gas_limit, forwarding_allowed, created_at)
 		VALUES (:id, :name, :stream_id, :schema_version, :type, :max_task_duration, :ocr_oracle_spec_id, :ocr2_oracle_spec_id, :direct_request_spec_id, :flux_monitor_spec_id,
-				:keeper_spec_id, :cron_spec_id, :vrf_spec_id, :webhook_spec_id, :blockhash_store_spec_id, :bootstrap_spec_id, :block_header_feeder_spec_id, :gateway_spec_id, 
-				:legacy_gas_station_server_spec_id, :legacy_gas_station_sidecar_spec_id, :workflow_spec_id, :external_job_id, :gas_limit, :forwarding_allowed, NOW())
+				:keeper_spec_id, :cron_spec_id, :vrf_spec_id, :webhook_spec_id, :blockhash_store_spec_id, :bootstrap_spec_id, :block_header_feeder_spec_id, :gateway_spec_id,
+				:legacy_gas_station_server_spec_id, :legacy_gas_station_sidecar_spec_id, :workflow_spec_id, :standard_capabilities_spec_id, :ccip_spec_id, :external_job_id, :gas_limit, :forwarding_allowed, NOW())
 		RETURNING *;`
 		}
 		query, args, err := tx.ds.BindNamed(query, job)
@@ -647,8 +762,30 @@ func (o *orm) InsertJob(ctx context.Context, job *Job) error {
 }
 
 // DeleteJob removes a job
-func (o *orm) DeleteJob(ctx context.Context, id int32) error {
+func (o *orm) DeleteJob(ctx context.Context, id int32, jobType Type) error {
 	o.lggr.Debugw("Deleting job", "jobID", id)
+	queries := map[Type]string{
+		DirectRequest:        `DELETE FROM direct_request_specs WHERE id IN (SELECT direct_request_spec_id FROM deleted_jobs)`,
+		FluxMonitor:          `DELETE FROM flux_monitor_specs WHERE id IN (SELECT flux_monitor_spec_id FROM deleted_jobs)`,
+		OffchainReporting:    `DELETE FROM ocr_oracle_specs WHERE id IN (SELECT ocr_oracle_spec_id FROM deleted_jobs)`,
+		OffchainReporting2:   `DELETE FROM ocr2_oracle_specs WHERE id IN (SELECT ocr2_oracle_spec_id FROM deleted_jobs)`,
+		Keeper:               `DELETE FROM keeper_specs WHERE id IN (SELECT keeper_spec_id FROM deleted_jobs)`,
+		Cron:                 `DELETE FROM cron_specs WHERE id IN (SELECT cron_spec_id FROM deleted_jobs)`,
+		VRF:                  `DELETE FROM vrf_specs WHERE id IN (SELECT vrf_spec_id FROM deleted_jobs)`,
+		Webhook:              `DELETE FROM webhook_specs WHERE id IN (SELECT webhook_spec_id FROM deleted_jobs)`,
+		BlockhashStore:       `DELETE FROM blockhash_store_specs WHERE id IN (SELECT blockhash_store_spec_id FROM deleted_jobs)`,
+		Bootstrap:            `DELETE FROM bootstrap_specs WHERE id IN (SELECT bootstrap_spec_id FROM deleted_jobs)`,
+		BlockHeaderFeeder:    `DELETE FROM block_header_feeder_specs WHERE id IN (SELECT block_header_feeder_spec_id FROM deleted_jobs)`,
+		Gateway:              `DELETE FROM gateway_specs WHERE id IN (SELECT gateway_spec_id FROM deleted_jobs)`,
+		Workflow:             `DELETE FROM workflow_specs WHERE id in (SELECT workflow_spec_id FROM deleted_jobs)`,
+		StandardCapabilities: `DELETE FROM standardcapabilities_specs WHERE id in (SELECT standard_capabilities_spec_id FROM deleted_jobs)`,
+		CCIP:                 `DELETE FROM ccip_specs WHERE id in (SELECT ccip_spec_id FROM deleted_jobs)`,
+		Stream:               ``,
+	}
+	q, ok := queries[jobType]
+	if !ok {
+		return errors.Errorf("job type %s not supported", jobType)
+	}
 	// Added a 1-minute timeout to this query since this can take a long time as data increases.
 	// This was added specifically due to an issue with a database that had a million of pipeline_runs and pipeline_task_runs
 	// and this query was taking ~40secs.
@@ -670,47 +807,17 @@ func (o *orm) DeleteJob(ctx context.Context, id int32) error {
 				bootstrap_spec_id,
 				block_header_feeder_spec_id,
 				gateway_spec_id,
-				workflow_spec_id
-		),
-		deleted_oracle_specs AS (
-			DELETE FROM ocr_oracle_specs WHERE id IN (SELECT ocr_oracle_spec_id FROM deleted_jobs)
-		),
-		deleted_oracle2_specs AS (
-			DELETE FROM ocr2_oracle_specs WHERE id IN (SELECT ocr2_oracle_spec_id FROM deleted_jobs)
-		),
-		deleted_keeper_specs AS (
-			DELETE FROM keeper_specs WHERE id IN (SELECT keeper_spec_id FROM deleted_jobs)
-		),
-		deleted_cron_specs AS (
-			DELETE FROM cron_specs WHERE id IN (SELECT cron_spec_id FROM deleted_jobs)
-		),
-		deleted_fm_specs AS (
-			DELETE FROM flux_monitor_specs WHERE id IN (SELECT flux_monitor_spec_id FROM deleted_jobs)
-		),
-		deleted_vrf_specs AS (
-			DELETE FROM vrf_specs WHERE id IN (SELECT vrf_spec_id FROM deleted_jobs)
-		),
-		deleted_webhook_specs AS (
-			DELETE FROM webhook_specs WHERE id IN (SELECT webhook_spec_id FROM deleted_jobs)
-		),
-		deleted_dr_specs AS (
-			DELETE FROM direct_request_specs WHERE id IN (SELECT direct_request_spec_id FROM deleted_jobs)
-		),
-		deleted_blockhash_store_specs AS (
-			DELETE FROM blockhash_store_specs WHERE id IN (SELECT blockhash_store_spec_id FROM deleted_jobs)
-		),
-		deleted_bootstrap_specs AS (
-			DELETE FROM bootstrap_specs WHERE id IN (SELECT bootstrap_spec_id FROM deleted_jobs)
-		),
-		deleted_block_header_feeder_specs AS (
-			DELETE FROM block_header_feeder_specs WHERE id IN (SELECT block_header_feeder_spec_id FROM deleted_jobs)
-		),
-		deleted_gateway_specs AS (
-			DELETE FROM gateway_specs WHERE id IN (SELECT gateway_spec_id FROM deleted_jobs)
-		),
-		deleted_workflow_specs AS (
-			DELETE FROM workflow_specs WHERE id in (SELECT workflow_spec_id FROM deleted_jobs)
-		),
+				workflow_spec_id,
+				standard_capabilities_spec_id,
+				ccip_spec_id,
+				stream_id
+		),`
+	if len(q) > 0 {
+		query += fmt.Sprintf(`deleted_specific_specs AS (
+								%s
+							),`, q)
+	}
+	query += `
 		deleted_job_pipeline_specs AS (
 			DELETE FROM job_pipeline_specs WHERE job_id IN (SELECT id FROM deleted_jobs) RETURNING pipeline_spec_id
 		)
@@ -784,7 +891,7 @@ func (o *orm) FindJobs(ctx context.Context, offset, limit int) (jobs []Job, coun
 			return fmt.Errorf("failed to query jobs count: %w", err)
 		}
 
-		sql = `SELECT jobs.*, job_pipeline_specs.pipeline_spec_id as pipeline_spec_id 
+		sql = `SELECT jobs.*, job_pipeline_specs.pipeline_spec_id as pipeline_spec_id
 			FROM jobs
 			    JOIN job_pipeline_specs ON (jobs.id = job_pipeline_specs.job_id)
 			ORDER BY jobs.created_at DESC, jobs.id DESC OFFSET $1 LIMIT $2;`
@@ -887,17 +994,13 @@ func LoadConfigVarsOCR(evmOcrCfg evmconfig.OCR, ocrCfg OCRConfig, os OCROracleSp
 	return LoadConfigVarsLocalOCR(evmOcrCfg, os, ocrCfg), nil
 }
 
-func (o *orm) FindJobTx(ctx context.Context, id int32) (Job, error) {
-	return o.FindJob(ctx, id)
-}
-
 // FindJob returns job by ID, with all relations preloaded
 func (o *orm) FindJob(ctx context.Context, id int32) (jb Job, err error) {
 	err = o.findJob(ctx, &jb, "id", id)
 	return
 }
 
-// FindJobWithoutSpecErrors returns a job by ID, without loading Spec Errors preloaded
+// FindJobWithoutSpecErrors returns a job by ID, without loading SpecVal Errors preloaded
 func (o *orm) FindJobWithoutSpecErrors(ctx context.Context, id int32) (jb Job, err error) {
 	err = o.transact(ctx, true, func(tx *orm) error {
 		stmt := "SELECT jobs.*, job_pipeline_specs.pipeline_spec_id as pipeline_spec_id FROM jobs JOIN job_pipeline_specs ON (jobs.id = job_pipeline_specs.job_id) WHERE jobs.id = $1 LIMIT 1"
@@ -998,8 +1101,8 @@ func (o *orm) findJob(ctx context.Context, jb *Job, col string, arg interface{})
 }
 
 func (o *orm) FindJobIDsWithBridge(ctx context.Context, name string) (jids []int32, err error) {
-	query := `SELECT 
-			jobs.id, pipeline_specs.dot_dag_source 
+	query := `SELECT
+			jobs.id, pipeline_specs.dot_dag_source
 		FROM jobs
 		    JOIN job_pipeline_specs ON job_pipeline_specs.job_id = jobs.id
 		    JOIN pipeline_specs ON pipeline_specs.id = job_pipeline_specs.pipeline_spec_id
@@ -1040,6 +1143,59 @@ func (o *orm) FindJobIDsWithBridge(ctx context.Context, name string) (jids []int
 		}
 	}
 
+	return
+}
+
+func (o *orm) FindJobIDByWorkflow(ctx context.Context, spec WorkflowSpec) (jobID int32, err error) {
+	stmt := `
+SELECT jobs.id FROM jobs
+INNER JOIN workflow_specs ws on jobs.workflow_spec_id = ws.id AND ws.workflow_owner = $1 AND ws.workflow_name = $2
+`
+	err = o.ds.GetContext(ctx, &jobID, stmt, spec.WorkflowOwner, spec.WorkflowName)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			err = fmt.Errorf("error searching for job by workflow (owner,name) ('%s','%s'): %w", spec.WorkflowOwner, spec.WorkflowName, err)
+		}
+		err = fmt.Errorf("FindJobIDByWorkflow failed: %w", err)
+		return
+	}
+
+	return
+}
+
+func (o *orm) FindJobIDByCapabilityNameAndVersion(ctx context.Context, spec CCIPSpec) (jobID int32, err error) {
+	stmt := `
+SELECT jobs.id FROM jobs
+INNER JOIN ccip_specs ccip on jobs.ccip_spec_id = ccip.id AND ccip.capability_labelled_name = $1 AND ccip.capability_version = $2
+`
+	err = o.ds.GetContext(ctx, &jobID, stmt, spec.CapabilityLabelledName, spec.CapabilityVersion)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		err = fmt.Errorf("error searching for job for CCIP (capabilityName,capabilityVersion) ('%s','%s'): %w", spec.CapabilityLabelledName, spec.CapabilityVersion, err)
+	}
+	return
+}
+
+func (o *orm) FindStandardCapabilityJobID(ctx context.Context, spec StandardCapabilitiesSpec) (jobID int32, err error) {
+	stmt := `
+SELECT jobs.id FROM jobs
+INNER JOIN standardcapabilities_specs sc on jobs.standard_capabilities_spec_id = sc.id AND sc.command = $1
+`
+	err = o.ds.GetContext(ctx, &jobID, stmt, spec.Command)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		err = fmt.Errorf("error searching for job for standardcapabilities (command) ('%s'): %w", spec.Command, err)
+	}
+	return
+}
+
+func (o *orm) FindGatewayJobID(ctx context.Context, spec GatewaySpec) (jobID int32, err error) {
+	stmt := `
+SELECT jobs.id FROM jobs
+INNER JOIN gateway_specs gs on jobs.gateway_spec_id = gs.id
+WHERE gs.gateway_config @> jsonb_build_object('ConnectionManagerConfig', jsonb_build_object('AuthGatewayId', $1::text));`
+	err = o.ds.GetContext(ctx, &jobID, stmt, spec.AuthGatewayID())
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		err = fmt.Errorf("error searching for job for gateway (ConnectionManagerConfig.AuthGatewayId) ('%s'): %w", spec.AuthGatewayID(), err)
+	}
 	return
 }
 
@@ -1121,7 +1277,6 @@ func (o *orm) loadPipelineRunIDs(ctx context.Context, jobID *int32, offset, limi
 					return
 				}
 				lggr.Debugw("loadPipelineRunIDs empty batch", "minId", minID, "maxID", maxID, "n", n, "len(ids)", len(ids), "limit", limit, "offset", offset, "skipped", skipped)
-
 			}
 		}
 		maxID = minID - 1
@@ -1243,6 +1398,20 @@ func (o *orm) FindJobsByPipelineSpecIDs(ctx context.Context, ids []int32) ([]Job
 	return jbs, errors.Wrap(err, "FindJobsByPipelineSpecIDs failed")
 }
 
+func (o *orm) FindJobIDByStreamID(ctx context.Context, streamID uint32) (jobID int32, err error) {
+	stmt := `SELECT id FROM jobs WHERE type = 'stream' AND stream_id = $1`
+	err = o.ds.GetContext(ctx, &jobID, stmt, streamID)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			err = errors.Wrap(err, "error searching for job by stream id")
+		}
+		err = errors.Wrap(err, "FindJobIDByStreamID failed")
+		return
+	}
+
+	return
+}
+
 // PipelineRuns returns pipeline runs for a job, with spec and taskruns loaded, latest first
 // If jobID is nil, returns all pipeline runs
 func (o *orm) PipelineRuns(ctx context.Context, jobID *int32, offset, size int) (runs []pipeline.Run, count int, err error) {
@@ -1251,7 +1420,7 @@ func (o *orm) PipelineRuns(ctx context.Context, jobID *int32, offset, size int) 
 		filter = fmt.Sprintf("JOIN job_pipeline_specs USING(pipeline_spec_id) WHERE job_pipeline_specs.job_id = %d", *jobID)
 	}
 	err = o.transact(ctx, false, func(tx *orm) error {
-		sql := fmt.Sprintf(`SELECT count(*) FROM pipeline_runs %s`, filter)
+		sql := "SELECT count(*) FROM pipeline_runs " + filter
 		if err = tx.ds.QueryRowxContext(ctx, sql).Scan(&count); err != nil {
 			return errors.Wrap(err, "error counting runs")
 		}
@@ -1342,6 +1511,8 @@ func (o *orm) loadAllJobTypes(ctx context.Context, job *Job) error {
 		o.loadJobType(ctx, job, "BootstrapSpec", "bootstrap_specs", job.BootstrapSpecID),
 		o.loadJobType(ctx, job, "GatewaySpec", "gateway_specs", job.GatewaySpecID),
 		o.loadJobType(ctx, job, "WorkflowSpec", "workflow_specs", job.WorkflowSpecID),
+		o.loadJobType(ctx, job, "StandardCapabilitiesSpec", "standardcapabilities_specs", job.StandardCapabilitiesSpecID),
+		o.loadJobType(ctx, job, "CCIPSpec", "ccip_specs", job.CCIPSpecID),
 	)
 }
 
@@ -1379,7 +1550,7 @@ func (o *orm) loadJobPipelineSpec(ctx context.Context, job *Job, id *int32) erro
 		ctx,
 		pipelineSpecRow,
 		`SELECT pipeline_specs.*, job_pipeline_specs.job_id as job_id
-			FROM pipeline_specs 
+			FROM pipeline_specs
     		JOIN job_pipeline_specs ON(pipeline_specs.id = job_pipeline_specs.pipeline_spec_id)
         	WHERE job_pipeline_specs.job_id = $1 AND job_pipeline_specs.pipeline_spec_id = $2`,
 		job.ID, *id,
@@ -1549,4 +1720,10 @@ func (r legacyGasStationServerSpecRow) toLegacyGasStationServerSpec() *LegacyGas
 
 func (o *orm) loadJobSpecErrors(ctx context.Context, jb *Job) error {
 	return errors.Wrapf(o.ds.SelectContext(ctx, &jb.JobSpecErrors, `SELECT * FROM job_spec_errors WHERE job_id = $1`, jb.ID), "failed to load job spec errors for job %d", jb.ID)
+}
+
+func checkIfKeyHasLock(ctx context.Context, ks keystore.Eth, address common.Address, usage evmkeystore.ServiceType) bool {
+	rm := ks.GetResourceMutex(ctx, address)
+
+	return rm.IsLocked(usage)
 }

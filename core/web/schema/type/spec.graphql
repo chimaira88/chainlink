@@ -11,10 +11,14 @@ union JobSpec =
     BlockHeaderFeederSpec |
     BootstrapSpec |
     GatewaySpec |
-    WorkflowSpec
+    WorkflowSpec |
+    StandardCapabilitiesSpec |
+    StreamSpec |
+    CCIPSpec
 
 type CronSpec {
     schedule: String!
+    evmChainID: String
     createdAt: Time!
 }
 
@@ -79,10 +83,12 @@ type OCR2Spec {
     p2pv2Bootstrappers: [String!]
     relay: String!
     relayConfig: Map!
+    onchainSigningStrategy: Map!
     transmitterID: String
     pluginType: String!
     pluginConfig: Map!
     feedID: String
+    allowNoBootstrappers: Boolean!
 }
 
 type VRFSpec {
@@ -169,4 +175,24 @@ type WorkflowSpec {
     workflowOwner: String!
     createdAt: Time!
     updatedAt: Time!
+}
+
+type StandardCapabilitiesSpec {
+    id: ID!
+    createdAt: Time!
+    command: String!
+    config: String
+}
+
+type StreamSpec {
+    streamID: String
+}
+
+type CCIPSpec {
+    createdAt: Time!
+    updatedAt: Time!
+    capabilityVersion: String!
+    capabilityLabelledName: String!
+    ocrKeyBundleIDs: Map!
+    p2pKeyID: String!
 }

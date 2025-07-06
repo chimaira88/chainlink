@@ -2,7 +2,6 @@ package blockhashstore
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -11,7 +10,7 @@ import (
 	"go.uber.org/multierr"
 	"golang.org/x/exp/maps"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
+	"github.com/smartcontractkit/chainlink-evm/pkg/logpoller"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
@@ -72,7 +71,6 @@ type Feeder struct {
 	errsLock      sync.Mutex
 }
 
-//go:generate mockery --quiet --name Timer --output ./mocks/ --case=underscore
 type Timer interface {
 	After(d time.Duration) <-chan time.Time
 }
@@ -88,7 +86,7 @@ func (f *Feeder) StartHeartbeats(ctx context.Context, timer Timer) {
 		f.lggr.Infow("Not starting heartbeat blockhash using storeEarliest")
 		return
 	}
-	f.lggr.Infow(fmt.Sprintf("Starting heartbeat blockhash using storeEarliest every %s", f.heartbeatPeriod.String()))
+	f.lggr.Infow("Starting heartbeat blockhash using storeEarliest every " + f.heartbeatPeriod.String())
 	for {
 		after := timer.After(f.heartbeatPeriod)
 		select {

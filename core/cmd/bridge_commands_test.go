@@ -3,6 +3,7 @@ package cmd_test
 import (
 	"bytes"
 	"flag"
+	"fmt"
 	"testing"
 	"time"
 
@@ -84,9 +85,9 @@ func TestShell_IndexBridges(t *testing.T) {
 	err = app.BridgeORM().CreateBridgeType(ctx, bt2)
 	require.NoError(t, err)
 
-	require.Nil(t, client.IndexBridges(cltest.EmptyCLIContext()))
+	require.NoError(t, client.IndexBridges(cltest.EmptyCLIContext()))
 	bridges := *r.Renders[0].(*cmd.BridgePresenters)
-	require.Equal(t, 2, len(bridges))
+	require.Len(t, bridges, 2)
 	p := bridges[0]
 	assert.Equal(t, bt1.Name.String(), p.Name)
 	assert.Equal(t, bt1.URL.String(), p.URL)
@@ -157,7 +158,7 @@ func TestShell_CreateBridge(t *testing.T) {
 			if test.errored {
 				assert.Error(t, client.CreateBridge(c))
 			} else {
-				assert.Nil(t, client.CreateBridge(c))
+				assert.NoError(t, client.CreateBridge(c))
 			}
 		})
 	}
@@ -190,4 +191,45 @@ func TestShell_RemoveBridge(t *testing.T) {
 	assert.Equal(t, bt.Name.String(), p.Name)
 	assert.Equal(t, bt.URL.String(), p.URL)
 	assert.Equal(t, bt.Confirmations, p.Confirmations)
+}
+func TestShell_UpdateBridge(t *testing.T) {
+	t.Parallel()
+
+	app := startNewApplicationV2(t, nil)
+	client, _ := app.NewShellAndRenderer()
+	name := testutils.RandomizeName("updatebridge")
+
+	bt := &bridges.BridgeType{
+		Name:          bridges.MustParseBridgeName(name),
+		URL:           cltest.WebURL(t, "https://testing.com/bridges"),
+		Confirmations: 0,
+	}
+	require.NoError(t, app.BridgeORM().CreateBridgeType(testutils.Context(t), bt))
+	tests := []struct {
+		name    string
+		args    []string
+		errored bool
+	}{
+		{"NoArgs", []string{}, true},
+		{"OnlyName", []string{name}, true},
+		{"ValidUpdate", []string{name, fmt.Sprintf(`{ "name": "%s", "url": "http://localhost:3000/updated" }`, name)}, false},
+		{"InvalidJSON", []string{name, `{ "url": "http://localhost:3000/updated"`}, true},
+	}
+
+	for _, tt := range tests {
+		test := tt
+		t.Run(test.name, func(t *testing.T) {
+			set := flag.NewFlagSet("bridge", 0)
+			flagSetApplyFromAction(client.UpdateBridge, set, "")
+
+			require.NoError(t, set.Parse(test.args))
+
+			c := cli.NewContext(nil, set, nil)
+			if test.errored {
+				assert.Error(t, client.UpdateBridge(c))
+			} else {
+				assert.NoError(t, client.UpdateBridge(c))
+			}
+		})
+	}
 }

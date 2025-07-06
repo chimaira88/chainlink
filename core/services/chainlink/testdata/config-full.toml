@@ -1,4 +1,5 @@
 InsecureFastScrypt = true
+InsecurePPROFHeap = true
 RootDir = 'test/root/dir'
 ShutdownGracePeriod = '10s'
 
@@ -6,6 +7,8 @@ ShutdownGracePeriod = '10s'
 FeedsManager = true
 LogPoller = true
 UICSAKeys = true
+CCIP = true
+MultiFeedsManagers = true
 
 [Database]
 DefaultIdleInTxSessionTimeout = '1m0s'
@@ -33,7 +36,7 @@ LeaseDuration = '1m0s'
 LeaseRefreshInterval = '1s'
 
 [TelemetryIngress]
-UniConn = true
+UniConn = false
 Logging = true
 BufferSize = 1234
 MaxBatchSize = 4321
@@ -97,6 +100,19 @@ UserAPITokenDuration = '240h0m0s'
 UpstreamSyncInterval = '0s'
 UpstreamSyncRateLimit = '2m0s'
 
+[WebServer.OIDC]
+ClientID = 'abcd1234'
+ProviderURL = 'https://id.provider.com/oauth2/default'
+RedirectURL = 'http://localhost:3000/signin'
+ClaimName = 'groups'
+AdminClaim = 'NodeAdmins'
+EditClaim = 'NodeEditors'
+RunClaim = 'NodeRunners'
+ReadClaim = 'NodeReadOnly'
+SessionTimeout = '15m0s'
+UserAPITokenEnabled = false
+UserAPITokenDuration = '240h0m0s'
+
 [WebServer.MFA]
 RPID = 'test-rpid'
 RPOrigin = 'test-rp-origin'
@@ -143,6 +159,7 @@ DatabaseTimeout = '8s'
 KeyBundleID = '7a5f66bbe6594259325bf2b4f5b1a9c900000000000000000000000000000000'
 CaptureEATelemetry = false
 CaptureAutomationCustomTelemetry = true
+AllowNoBootstrappers = true
 DefaultTransactionQueueDepth = 1
 SimulateTransactions = false
 TraceLogging = false
@@ -159,6 +176,7 @@ SimulateTransactions = true
 TransmitterAddress = '0xa0788FC17B1dEe36f057c42B6F373A34B014687e'
 CaptureEATelemetry = false
 TraceLogging = false
+ConfigLogValidation = false
 
 [P2P]
 IncomingMessageBufferSize = 13
@@ -232,6 +250,8 @@ env = 'dev'
 test = 'load'
 
 [Mercury]
+VerboseLogging = true
+
 [Mercury.Cache]
 LatestReportTTL = '1m40s'
 MaxStaleAge = '1m41s'
@@ -241,10 +261,20 @@ LatestReportDeadline = '1m42s'
 CertFile = '/path/to/cert.pem'
 
 [Mercury.Transmitter]
+Protocol = 'grpc'
 TransmitQueueMaxSize = 123
 TransmitTimeout = '3m54s'
+TransmitConcurrency = 456
+ReaperFrequency = '9m27s'
+ReaperMaxAge = '678h0m0s'
 
 [Capabilities]
+[Capabilities.RateLimit]
+GlobalRPS = 200.0
+GlobalBurst = 200
+PerSenderRPS = 200.0
+PerSenderBurst = 200
+
 [Capabilities.Peering]
 IncomingMessageBufferSize = 13
 OutgoingMessageBufferSize = 17
@@ -259,6 +289,69 @@ DeltaDial = '1m0s'
 DeltaReconcile = '2s'
 ListenAddresses = ['foo', 'bar']
 
+[Capabilities.Dispatcher]
+SupportedVersion = 1
+ReceiverBufferSize = 10000
+
+[Capabilities.Dispatcher.RateLimit]
+GlobalRPS = 800.0
+GlobalBurst = 1000
+PerSenderRPS = 10.0
+PerSenderBurst = 50
+
+[Capabilities.ExternalRegistry]
+Address = ''
+NetworkID = 'evm'
+ChainID = '1'
+
+[Capabilities.WorkflowRegistry]
+Address = ''
+NetworkID = 'evm'
+ChainID = '1'
+MaxBinarySize = '20.00mb'
+MaxEncryptedSecretsSize = '26.40kb'
+MaxConfigSize = '50.00kb'
+SyncStrategy = 'event'
+
+[Capabilities.GatewayConnector]
+ChainIDForNodeKey = '11155111'
+NodeAddress = '0x68902d681c28119f9b2531473a417088bf008e59'
+DonID = 'example_don'
+WSHandshakeTimeoutMillis = 100
+AuthMinChallengeLen = 10
+AuthTimestampToleranceSec = 10
+
+[[Capabilities.GatewayConnector.Gateways]]
+ID = 'example_gateway'
+URL = 'wss://localhost:8081/node'
+
+[Telemetry]
+Enabled = true
+CACertFile = 'cert-file'
+Endpoint = 'example.com/collector'
+InsecureConnection = true
+TraceSampleRatio = 0.01
+EmitterBatchProcessor = true
+EmitterExportTimeout = '1s'
+ChipIngressEndpoint = 'example.com/chip-ingress'
+
+[Telemetry.ResourceAttributes]
+Baz = 'test'
+Foo = 'bar'
+
+[Workflows]
+[Workflows.Limits]
+Global = 200
+PerOwner = 200
+
+[CRE]
+[CRE.Streams]
+WsURL = 'streams.url'
+RestURL = 'streams.url'
+
+[Billing]
+URL = 'localhost:4319'
+
 [[EVM]]
 ChainID = '1'
 Enabled = false
@@ -267,7 +360,8 @@ BlockBackfillDepth = 100
 BlockBackfillSkip = true
 ChainType = 'Optimism'
 FinalityDepth = 42
-FinalityTagEnabled = false
+SafeDepth = 0
+FinalityTagEnabled = true
 FlagsContractAddress = '0xae4E781a6218A8031764928E88d457937A954fC3'
 LinkContractAddress = '0x538aAaB4ea120b2bC2fe5D296852D948F07D849e'
 LogBackfillBatchSize = 17
@@ -280,16 +374,27 @@ MinContractPayment = '9.223372036854775807 link'
 NonceAutoSync = true
 NoNewHeadsThreshold = '1m0s'
 OperatorFactoryAddress = '0xa5B85635Be42F21f94F28034B7DA440EeFF0F418'
+LogBroadcasterEnabled = true
 RPCDefaultBatchSize = 17
 RPCBlockQueryDelay = 10
+FinalizedBlockOffset = 16
+NoNewFinalizedHeadsThreshold = '1h0m0s'
 
 [EVM.Transactions]
+Enabled = true
 ForwardersEnabled = true
 MaxInFlight = 19
 MaxQueued = 99
 ReaperInterval = '1m0s'
 ReaperThreshold = '1m0s'
 ResendAfterThreshold = '1h0m0s'
+ConfirmationTimeout = '1m0s'
+
+[EVM.Transactions.AutoPurge]
+Enabled = false
+
+[EVM.Transactions.TransactionManagerV2]
+Enabled = false
 
 [EVM.BalanceMonitor]
 Enabled = true
@@ -303,6 +408,7 @@ LimitDefault = 12
 LimitMax = 17
 LimitMultiplier = '1.234'
 LimitTransfer = 100
+EstimateLimit = false
 BumpMin = '100 wei'
 BumpPercent = 10
 BumpThreshold = 6
@@ -328,10 +434,16 @@ CheckInclusionPercentile = 19
 EIP1559FeeCapBufferBlocks = 13
 TransactionPercentile = 15
 
+[EVM.GasEstimator.FeeHistory]
+CacheTimeout = '1s'
+
 [EVM.HeadTracker]
 HistoryDepth = 15
 MaxBufferSize = 17
 SamplingInterval = '1h0m0s'
+MaxAllowedFinalityDepth = 1500
+FinalityTagBypass = false
+PersistenceEnabled = false
 
 [[EVM.KeySpecific]]
 Key = '0x2a3e23c6f242F5345320814aC8a1b4E58707D292'
@@ -347,6 +459,10 @@ SyncThreshold = 13
 LeaseDuration = '0s'
 NodeIsSyncingEnabled = true
 FinalizedBlockPollInterval = '1s'
+EnforceRepeatableRead = true
+DeathDeclarationDelay = '1m0s'
+NewHeadsPollInterval = '0s'
+VerifyChainID = true
 
 [EVM.NodePool.Errors]
 NonceTooLow = '(: |^)nonce too low'
@@ -363,6 +479,8 @@ L2Full = '(: |^)l2 full'
 TransactionAlreadyMined = '(: |^)transaction already mined'
 Fatal = '(: |^)fatal'
 ServiceUnavailable = '(: |^)service unavailable'
+TooManyResults = '(: |^)too many results'
+MissingBlocks = '(: |^)missing blocks'
 
 [EVM.OCR]
 ContractConfirmations = 11
@@ -376,10 +494,17 @@ ObservationGracePeriod = '1s'
 [EVM.OCR2.Automation]
 GasLimit = 540
 
+[EVM.Workflow]
+GasLimitDefault = 400000
+TxAcceptanceState = 2
+PollPeriod = '2s'
+AcceptanceTimeout = '30s'
+
 [[EVM.Nodes]]
 Name = 'foo'
 WSURL = 'wss://web.socket/test/foo'
 HTTPURL = 'https://foo.web'
+HTTPURLExtraWrite = 'https://foo.web/extra'
 
 [[EVM.Nodes]]
 Name = 'bar'
@@ -391,36 +516,10 @@ Name = 'broadcast'
 HTTPURL = 'http://broadcast.mirror'
 SendOnly = true
 
-[[Cosmos]]
-ChainID = 'Malaga-420'
-Enabled = true
-Bech32Prefix = 'wasm'
-BlockRate = '1m0s'
-BlocksUntilTxTimeout = 12
-ConfirmPollPeriod = '1s'
-FallbackGasPrice = '0.001'
-GasToken = 'ucosm'
-GasLimitMultiplier = '1.2'
-MaxMsgsPerBatch = 17
-OCR2CachePollPeriod = '1m0s'
-OCR2CacheTTL = '1h0m0s'
-TxMsgTimeout = '1s'
-
-[[Cosmos.Nodes]]
-Name = 'primary'
-TendermintURL = 'http://tender.mint'
-
-[[Cosmos.Nodes]]
-Name = 'foo'
-TendermintURL = 'http://foo.url'
-
-[[Cosmos.Nodes]]
-Name = 'bar'
-TendermintURL = 'http://bar.web'
-
 [[Solana]]
 ChainID = 'mainnet'
 Enabled = false
+BlockTime = '500ms'
 BalancePollPeriod = '1m0s'
 ConfirmPollPeriod = '1s'
 OCR2CachePollPeriod = '1m0s'
@@ -428,6 +527,8 @@ OCR2CacheTTL = '1h0m0s'
 TxTimeout = '1h0m0s'
 TxRetryTimeout = '1m0s'
 TxConfirmTimeout = '1s'
+TxExpirationRebroadcast = false
+TxRetentionTimeout = '0s'
 SkipPreflight = true
 Commitment = 'banana'
 MaxRetries = 7
@@ -436,30 +537,46 @@ ComputeUnitPriceMax = 1000
 ComputeUnitPriceMin = 10
 ComputeUnitPriceDefault = 100
 FeeBumpPeriod = '1m0s'
+BlockHistoryPollPeriod = '1m0s'
+BlockHistorySize = 1
+BlockHistoryBatchLoadSize = 20
+ComputeUnitLimitDefault = 100000
+EstimateComputeUnitLimit = false
+LogPollerStartingLookback = '24h0m0s'
+
+[Solana.MultiNode]
+Enabled = false
+PollFailureThreshold = 5
+PollInterval = '1s'
+SelectionMode = 'HighestHead'
+SyncThreshold = 5
+NodeIsSyncingEnabled = false
+LeaseDuration = '1m0s'
+NewHeadsPollInterval = '1s'
+FinalizedBlockPollInterval = '1s'
+EnforceRepeatableRead = true
+DeathDeclarationDelay = '1m0s'
+VerifyChainID = true
+NodeNoNewHeadsThreshold = '1m0s'
+NoNewFinalizedHeadsThreshold = '1m0s'
+FinalityDepth = 0
+FinalityTagEnabled = true
+FinalizedBlockOffset = 0
 
 [[Solana.Nodes]]
 Name = 'primary'
 URL = 'http://solana.web'
+SendOnly = false
+Order = 1
 
 [[Solana.Nodes]]
 Name = 'foo'
 URL = 'http://solana.foo'
+SendOnly = true
+Order = 2
 
 [[Solana.Nodes]]
 Name = 'bar'
 URL = 'http://solana.bar'
-
-[[Starknet]]
-ChainID = 'foobar'
-FeederURL = 'http://feeder.url'
-Enabled = true
-OCR2CachePollPeriod = '6h0m0s'
-OCR2CacheTTL = '3m0s'
-RequestTimeout = '1m3s'
-TxTimeout = '13s'
-ConfirmationPoll = '42s'
-
-[[Starknet.Nodes]]
-Name = 'primary'
-URL = 'http://stark.node'
-APIKey = 'key'
+SendOnly = true
+Order = 3

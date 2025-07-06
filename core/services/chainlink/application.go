@@ -3,36 +3,53 @@ package chainlink
 import (
 	"bytes"
 	"context"
+	stderrors "errors"
 	"fmt"
 	"math/big"
 	"net/http"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 	"github.com/grafana/pyroscope-go"
+	"github.com/jonboulle/clockwork"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/multierr"
 	"go.uber.org/zap/zapcore"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/beholder"
+	"github.com/smartcontractkit/chainlink-common/pkg/billing"
+	"github.com/smartcontractkit/chainlink-common/pkg/custmsg"
 	"github.com/smartcontractkit/chainlink-common/pkg/loop"
 	commonservices "github.com/smartcontractkit/chainlink-common/pkg/services"
+	commontypes "github.com/smartcontractkit/chainlink-common/pkg/types"
+
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
+	"github.com/smartcontractkit/chainlink-common/pkg/timeutil"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/jsonserializable"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox"
-
-	"github.com/smartcontractkit/chainlink/v2/core/capabilities"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
-	"github.com/smartcontractkit/chainlink/v2/core/static"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/keys"
+	"github.com/smartcontractkit/chainlink-evm/pkg/logpoller"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	evmutils "github.com/smartcontractkit/chainlink-evm/pkg/utils"
 
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
 	"github.com/smartcontractkit/chainlink/v2/core/build"
+	"github.com/smartcontractkit/chainlink/v2/core/capabilities"
+	"github.com/smartcontractkit/chainlink/v2/core/capabilities/ccip"
+	"github.com/smartcontractkit/chainlink/v2/core/capabilities/compute"
+	gatewayconnector "github.com/smartcontractkit/chainlink/v2/core/capabilities/gateway_connector"
 	"github.com/smartcontractkit/chainlink/v2/core/capabilities/remote"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	evmutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
+	remotetypes "github.com/smartcontractkit/chainlink/v2/core/capabilities/remote/types"
 	"github.com/smartcontractkit/chainlink/v2/core/config"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/logger/audit"
@@ -44,9 +61,11 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/feeds"
 	"github.com/smartcontractkit/chainlink/v2/core/services/fluxmonitorv2"
 	"github.com/smartcontractkit/chainlink/v2/core/services/gateway"
+	"github.com/smartcontractkit/chainlink/v2/core/services/headreporter"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keeper"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
+	"github.com/smartcontractkit/chainlink/v2/core/services/llo/retirement"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocrbootstrap"
@@ -55,23 +74,33 @@ import (
 	externalp2p "github.com/smartcontractkit/chainlink/v2/core/services/p2p/wrapper"
 	"github.com/smartcontractkit/chainlink/v2/core/services/periodicbackup"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
-	"github.com/smartcontractkit/chainlink/v2/core/services/promreporter"
+	"github.com/smartcontractkit/chainlink/v2/core/services/registrysyncer"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc"
+	"github.com/smartcontractkit/chainlink/v2/core/services/standardcapabilities"
 	"github.com/smartcontractkit/chainlink/v2/core/services/streams"
 	"github.com/smartcontractkit/chainlink/v2/core/services/telemetry"
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf"
 	"github.com/smartcontractkit/chainlink/v2/core/services/webhook"
 	"github.com/smartcontractkit/chainlink/v2/core/services/workflows"
+	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/artifacts"
+	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/metering"
+	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/ratelimiter"
+	workflowstore "github.com/smartcontractkit/chainlink/v2/core/services/workflows/store"
+	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/syncer"
+	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/syncerlimiter"
 	"github.com/smartcontractkit/chainlink/v2/core/sessions"
 	"github.com/smartcontractkit/chainlink/v2/core/sessions/ldapauth"
 	"github.com/smartcontractkit/chainlink/v2/core/sessions/localauth"
+	"github.com/smartcontractkit/chainlink/v2/core/sessions/oidcauth"
+	"github.com/smartcontractkit/chainlink/v2/core/static"
 	"github.com/smartcontractkit/chainlink/v2/plugins"
 )
 
+const HeartbeatPeriod = time.Second
+
 // Application implements the common functions used in the core node.
-//
-//go:generate mockery --quiet --name Application --output ../../internal/mocks/ --case=underscore
 type Application interface {
 	Start(ctx context.Context) error
 	Stop() error
@@ -93,7 +122,6 @@ type Application interface {
 	// V2 Jobs (TOML specified)
 	JobSpawner() job.Spawner
 	JobORM() job.ORM
-	EVMORM() evmtypes.Configs
 	PipelineORM() pipeline.ORM
 	BridgeORM() bridges.ORM
 	BasicAdminUsersORM() sessions.BasicAdminUsersORM
@@ -109,9 +137,9 @@ type Application interface {
 	// Feeds
 	GetFeedsService() feeds.Service
 
-	// ReplayFromBlock replays logs from on or after the given block number. If forceBroadcast is
-	// set to true, consumers will reprocess data even if it has already been processed.
-	ReplayFromBlock(chainID *big.Int, number uint64, forceBroadcast bool) error
+	// ReplayFromBlock replays logs from on or after the given block number. If forceBroadcast (evm only)
+	// is set to true, consumers will reprocess data even if it has already been processed.
+	ReplayFromBlock(ctx context.Context, chainFamily string, chainID string, number uint64, forceBroadcast bool) error
 
 	// ID is unique to this particular application instance
 	ID() uuid.UUID
@@ -119,7 +147,7 @@ type Application interface {
 	SecretGenerator() SecretGenerator
 
 	// FindLCA - finds last common ancestor for LogPoller's chain available in the database and RPC chain
-	FindLCA(ctx context.Context, chainID *big.Int) (*logpoller.LogPollerBlock, error)
+	FindLCA(ctx context.Context, chainID *big.Int) (*logpoller.Block, error)
 	// DeleteLogPollerDataAfter - delete LogPoller state starting from the specified block
 	DeleteLogPollerDataAfter(ctx context.Context, chainID *big.Int, start int64) error
 }
@@ -135,7 +163,7 @@ type ChainlinkApplication struct {
 	pipelineRunner           pipeline.Runner
 	bridgeORM                bridges.ORM
 	localAdminUsersORM       sessions.BasicAdminUsersORM
-	authenticationProvider   sessions.AuthenticationProvider
+	authenticationProvider   sessions.AuthenticationProvider // Note: this will be OIDC instance
 	txmStorageService        txmgr.EvmTxStore
 	FeedsService             feeds.Service
 	webhookJobRunner         webhook.JobRunner
@@ -146,7 +174,6 @@ type ChainlinkApplication struct {
 	shutdownOnce             sync.Once
 	srvcs                    []services.ServiceCtx
 	HealthChecker            services.Checker
-	Nurse                    *services.Nurse
 	logger                   logger.SugaredLogger
 	AuditLogger              audit.AuditLogger
 	closeLogger              func() error
@@ -161,22 +188,81 @@ type ChainlinkApplication struct {
 }
 
 type ApplicationOpts struct {
-	Config                     GeneralConfig
-	Logger                     logger.Logger
-	MailMon                    *mailbox.Monitor
-	DS                         sqlutil.DataSource
-	KeyStore                   keystore.Master
-	RelayerChainInteroperators *CoreRelayerChainInteroperators
-	AuditLogger                audit.AuditLogger
-	CloseLogger                func() error
-	ExternalInitiatorManager   webhook.ExternalInitiatorManager
-	Version                    string
-	RestrictedHTTPClient       *http.Client
-	UnrestrictedHTTPClient     *http.Client
-	SecretGenerator            SecretGenerator
-	LoopRegistry               *plugins.LoopRegistry
-	GRPCOpts                   loop.GRPCOpts
-	MercuryPool                wsrpc.Pool
+	// CREOpts is the options for the CRE services
+	CREOpts
+
+	Config                   GeneralConfig
+	Logger                   logger.Logger
+	Registerer               prometheus.Registerer
+	DS                       sqlutil.DataSource
+	KeyStore                 keystore.Master
+	AuditLogger              audit.AuditLogger
+	CloseLogger              func() error
+	ExternalInitiatorManager webhook.ExternalInitiatorManager
+	Version                  string
+	RestrictedHTTPClient     *http.Client
+	UnrestrictedHTTPClient   *http.Client
+	SecretGenerator          SecretGenerator
+	GRPCOpts                 loop.GRPCOpts
+	MercuryPool              wsrpc.Pool
+	RetirementReportCache    retirement.RetirementReportCache
+	LLOTransmissionReaper    services.ServiceCtx
+	NewOracleFactoryFn       standardcapabilities.NewOracleFactoryFn
+	EVMFactoryConfigFn       func(*EVMFactoryConfig)
+}
+
+type Heartbeat struct {
+	commonservices.Service
+	eng *commonservices.Engine
+
+	beat time.Duration
+}
+
+func NewHeartbeat(lggr logger.Logger) Heartbeat {
+	h := Heartbeat{
+		beat: HeartbeatPeriod,
+	}
+	h.Service, h.eng = commonservices.Config{
+		Name:  "Heartbeat",
+		Start: h.start,
+	}.NewServiceEngine(lggr)
+	return h
+}
+
+func (h *Heartbeat) start(_ context.Context) error {
+	// Setup beholder resources
+	gauge, err := beholder.GetMeter().Int64Gauge("heartbeat")
+	if err != nil {
+		return err
+	}
+	count, err := beholder.GetMeter().Int64Gauge("heartbeat_count")
+	if err != nil {
+		return err
+	}
+
+	cme := custmsg.NewLabeler()
+
+	// Define tick functions
+	beatFn := func(ctx context.Context) {
+		// TODO allow override of tracer provider into engine for beholder
+		_, innerSpan := beholder.GetTracer().Start(ctx, "heartbeat.beat")
+		defer innerSpan.End()
+
+		gauge.Record(ctx, 1)
+		count.Record(ctx, 1)
+
+		err = cme.Emit(ctx, "heartbeat")
+		if err != nil {
+			h.eng.Errorw("heartbeat emit failed", "err", err)
+		}
+	}
+
+	h.eng.GoTick(timeutil.NewTicker(h.getBeat), beatFn)
+	return nil
+}
+
+func (h *Heartbeat) getBeat() time.Duration {
+	return h.beat
 }
 
 // NewApplication initializes a new store if one is not already
@@ -184,40 +270,117 @@ type ApplicationOpts struct {
 // the logger at the same directory and returns the Application to
 // be used by the node.
 // TODO: Inject more dependencies here to save booting up useless stuff in tests
-func NewApplication(opts ApplicationOpts) (Application, error) {
+func NewApplication(ctx context.Context, opts ApplicationOpts) (Application, error) {
 	var srvcs []services.ServiceCtx
+
+	heartbeat := NewHeartbeat(opts.Logger)
+	srvcs = append(srvcs, &heartbeat)
+
 	auditLogger := opts.AuditLogger
 	cfg := opts.Config
-	relayerChainInterops := opts.RelayerChainInteroperators
-	mailMon := opts.MailMon
 	externalInitiatorManager := opts.ExternalInitiatorManager
 	globalLogger := logger.Sugared(opts.Logger)
 	keyStore := opts.KeyStore
 	restrictedHTTPClient := opts.RestrictedHTTPClient
 	unrestrictedHTTPClient := opts.UnrestrictedHTTPClient
-	registry := capabilities.NewRegistry(globalLogger)
 
-	var externalPeerWrapper p2ptypes.PeerWrapper
-	if cfg.Capabilities().Peering().Enabled() {
-		externalPeer := externalp2p.NewExternalPeerWrapper(keyStore.P2P(), cfg.Capabilities().Peering(), globalLogger)
-		signer := externalPeer
-		externalPeerWrapper = externalPeer
+	mailMon := mailbox.NewMonitor(cfg.AppID().String(), globalLogger.Named("Mailbox"))
 
-		srvcs = append(srvcs, externalPeerWrapper)
-
-		// NOTE: RegistrySyncer will depend on a Relayer when fully implemented
-		dispatcher := remote.NewDispatcher(externalPeerWrapper, signer, registry, globalLogger)
-		registrySyncer := capabilities.NewRegistrySyncer(externalPeerWrapper, registry, dispatcher, globalLogger)
-		srvcs = append(srvcs, dispatcher, registrySyncer)
+	if opts.CapabilitiesRegistry == nil {
+		// for tests only, in prod Registry should always be set at this point
+		opts.CapabilitiesRegistry = capabilities.NewRegistry(globalLogger)
 	}
 
+	csaKeystore := &keystore.CSASigner{CSA: keyStore.CSA()}
+	beholderAuthHeaders, csaPubKeyHex, err := keystore.BuildBeholderAuth(ctx, keyStore.CSA())
+	if err != nil {
+		return nil, fmt.Errorf("failed to build Beholder auth: %w", err)
+	}
+	loopRegistry := plugins.NewLoopRegistry(globalLogger, cfg.AppID().String(), cfg.Feature().LogPoller(), cfg.Database(), cfg.Mercury(), cfg.Tracing(), cfg.Telemetry(), beholderAuthHeaders, csaPubKeyHex)
+
+	relayerFactory := RelayerFactory{
+		Logger:                opts.Logger,
+		Registerer:            opts.Registerer,
+		LoopRegistry:          loopRegistry,
+		GRPCOpts:              opts.GRPCOpts,
+		MercuryPool:           opts.MercuryPool,
+		CapabilitiesRegistry:  opts.CapabilitiesRegistry,
+		HTTPClient:            opts.UnrestrictedHTTPClient,
+		RetirementReportCache: opts.RetirementReportCache,
+	}
+
+	evmFactoryCfg := EVMFactoryConfig{
+		ChainOpts: legacyevm.ChainOpts{
+			ChainConfigs:   cfg.EVMConfigs(),
+			DatabaseConfig: cfg.Database(),
+			ListenerConfig: cfg.Database().Listener(),
+			FeatureConfig:  cfg.Feature(),
+			MailMon:        mailMon,
+			DS:             opts.DS,
+		},
+		EthKeystore:   keyStore.Eth(),
+		CSAKeystore:   csaKeystore,
+		MercuryConfig: cfg.Mercury(),
+	}
+
+	if opts.EVMFactoryConfigFn != nil {
+		opts.EVMFactoryConfigFn(&evmFactoryCfg)
+	}
+
+	// evm always enabled for backward compatibility
+	// TODO BCF-2510 this needs to change in order to clear the path for EVM extraction
+	initOps := []CoreRelayerChainInitFunc{InitDummy(relayerFactory), InitEVM(relayerFactory, evmFactoryCfg)}
+
+	if cfg.CosmosEnabled() {
+		initOps = append(initOps, InitCosmos(relayerFactory, keyStore.Cosmos(), keyStore.CSA(), cfg.CosmosConfigs()))
+	}
+	if cfg.SolanaEnabled() {
+		solanaCfg := SolanaFactoryConfig{
+			TOMLConfigs: cfg.SolanaConfigs(),
+			DS:          opts.DS,
+		}
+		initOps = append(initOps, InitSolana(relayerFactory, keyStore.Solana(), keyStore.CSA(), solanaCfg))
+	}
+	if cfg.StarkNetEnabled() {
+		initOps = append(initOps, InitStarknet(relayerFactory, keyStore.StarkNet(), keyStore.CSA(), cfg.StarknetConfigs()))
+	}
+	if cfg.AptosEnabled() {
+		initOps = append(initOps, InitAptos(relayerFactory, keyStore.Aptos(), keyStore.CSA(), cfg.AptosConfigs()))
+	}
+	if cfg.TronEnabled() {
+		initOps = append(initOps, InitTron(relayerFactory, keyStore.Tron(), keyStore.CSA(), cfg.TronConfigs()))
+	}
+	if cfg.TONEnabled() {
+		initOps = append(initOps, InitTON(relayerFactory, keyStore.TON(), keyStore.CSA(), cfg.TONConfigs()))
+	}
+
+	relayChainInterops, err := NewCoreRelayerChainInteroperators(initOps...)
+	if err != nil {
+		return nil, err
+	}
+
+	var billingClient metering.BillingClient
+
+	if opts.BillingClient != nil {
+		billingClient = opts.BillingClient
+	} else if cfg.Billing().URL() != "" {
+		billingClient, err = billing.NewWorkflowClient(opts.Config.Billing().URL())
+		if err != nil {
+			globalLogger.Infof("NewApplication: failed to create billing client; %s", err)
+		}
+	}
+
+	creServices, err := newCREServices(ctx, globalLogger, opts.DS, keyStore, cfg.Capabilities(), cfg.Workflows(), relayChainInterops, opts.CREOpts, billingClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initilize CRE: %w", err)
+	}
+	srvcs = append(srvcs, creServices.srvs...)
 	// LOOPs can be created as options, in the  case of LOOP relayers, or
 	// as OCR2 job implementations, in the case of Median today.
 	// We will have a non-nil registry here in LOOP relayers are being used, otherwise
 	// we need to initialize in case we serve OCR2 LOOPs
-	loopRegistry := opts.LoopRegistry
 	if loopRegistry == nil {
-		loopRegistry = plugins.NewLoopRegistry(globalLogger, opts.Config.Tracing())
+		loopRegistry = plugins.NewLoopRegistry(globalLogger, opts.Config.AppID().String(), opts.Config.Feature().LogPoller(), opts.Config.Database(), opts.Config.Mercury(), opts.Config.Tracing(), opts.Config.Telemetry(), beholderAuthHeaders, csaPubKeyHex)
 	}
 
 	// If the audit logger is enabled
@@ -238,19 +401,14 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 	}
 
 	ap := cfg.AutoPprof()
-	var nurse *services.Nurse
 	if ap.Enabled() {
 		globalLogger.Info("Nurse service (automatic pprof profiling) is enabled")
-		nurse = services.NewNurse(ap, globalLogger)
-		err := nurse.Start()
-		if err != nil {
-			return nil, err
-		}
+		srvcs = append(srvcs, services.NewNurse(ap, globalLogger))
 	} else {
 		globalLogger.Info("Nurse service (automatic pprof profiling) is disabled")
 	}
 
-	telemetryManager := telemetry.NewManager(cfg.TelemetryIngress(), keyStore.CSA(), globalLogger)
+	telemetryManager := telemetry.NewManager(cfg.TelemetryIngress(), csaKeystore, globalLogger)
 	srvcs = append(srvcs, telemetryManager)
 
 	backupCfg := cfg.Database().Backup()
@@ -270,26 +428,30 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 	if opts.MercuryPool != nil {
 		srvcs = append(srvcs, opts.MercuryPool)
 	}
+	if opts.RetirementReportCache != nil {
+		srvcs = append(srvcs, opts.RetirementReportCache)
+	}
+	if opts.LLOTransmissionReaper != nil {
+		srvcs = append(srvcs, opts.LLOTransmissionReaper)
+	}
 
 	// EVM chains are used all over the place. This will need to change for fully EVM extraction
 	// TODO: BCF-2510, BCF-2511
 
-	legacyEVMChains := relayerChainInterops.LegacyEVMChains()
+	legacyEVMChains := relayChainInterops.LegacyEVMChains()
 	if legacyEVMChains == nil {
-		return nil, fmt.Errorf("no evm chains found")
+		return nil, errors.New("no evm chains found")
 	}
 
 	srvcs = append(srvcs, mailMon)
-	srvcs = append(srvcs, relayerChainInterops.Services()...)
-	promReporter := promreporter.NewPromReporter(opts.DS, legacyEVMChains, globalLogger)
-	srvcs = append(srvcs, promReporter)
+	srvcs = append(srvcs, relayChainInterops.Services()...)
 
 	// Initialize Local Users ORM and Authentication Provider specified in config
 	// BasicAdminUsersORM is initialized and required regardless of separate Authentication Provider
 	localAdminUsersORM := localauth.NewORM(opts.DS, cfg.WebServer().SessionTimeout().Duration(), globalLogger, auditLogger)
 
 	// Initialize Sessions ORM based on environment configured authenticator
-	// localDB auth or remote LDAP auth
+	// localDB auth, LDAP auth, or OIDC auth
 	authMethod := cfg.WebServer().AuthenticationMethod()
 	var authenticationProvider sessions.AuthenticationProvider
 	var sessionReaper *utils.SleeperTask
@@ -303,7 +465,18 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 		if err != nil {
 			return nil, errors.Wrap(err, "NewApplication: failed to initialize LDAP Authentication module")
 		}
-		sessionReaper = ldapauth.NewLDAPServerStateSync(opts.DS, cfg.WebServer().LDAP(), globalLogger)
+		syncer := ldapauth.NewLDAPServerStateSyncer(opts.DS, cfg.WebServer().LDAP(), globalLogger)
+		srvcs = append(srvcs, syncer)
+		sessionReaper = utils.NewSleeperTaskCtx(syncer)
+	case sessions.OIDCAuth:
+		var err error
+		authenticationProvider, err = oidcauth.NewOIDCAuthenticator(
+			opts.DS, cfg.WebServer().OIDC(), globalLogger, auditLogger,
+		)
+		if err != nil {
+			return nil, errors.Wrap(err, "NewApplication: failed to initialize OIDC Authentication module")
+		}
+		sessionReaper = oidcauth.NewSessionReaper(opts.DS, cfg.WebServer(), globalLogger)
 	case sessions.LocalAuth:
 		authenticationProvider = localauth.NewORM(opts.DS, cfg.WebServer().SessionTimeout().Duration(), globalLogger, auditLogger)
 		sessionReaper = localauth.NewSessionReaper(opts.DS, cfg.WebServer(), globalLogger)
@@ -319,14 +492,32 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 		jobORM         = job.NewORM(opts.DS, pipelineORM, bridgeORM, keyStore, globalLogger)
 		txmORM         = txmgr.NewTxStore(opts.DS, globalLogger)
 		streamRegistry = streams.NewRegistry(globalLogger, pipelineRunner)
+		workflowORM    = workflowstore.NewInMemoryStore(globalLogger, clockwork.NewRealClock())
 	)
+	srvcs = append(srvcs, workflowORM)
 
+	promReporter := headreporter.NewLegacyEVMPrometheusReporter(opts.DS, legacyEVMChains)
+	evmChainIDs := make([]*big.Int, len(cfg.EVMConfigs()))
+	for i, chain := range cfg.EVMConfigs() {
+		evmChainIDs[i] = chain.ChainID.ToInt()
+	}
+
+	legacyEVMTelemReporter := headreporter.NewLegacyEVMTelemetryReporter(telemetryManager, globalLogger, evmChainIDs...)
+	loopTelemReporter := headreporter.NewTelemetryReporter(telemetryManager, globalLogger, relayChainInterops.GetIDToRelayerMap())
+	headReporter := headreporter.NewHeadReporterService(opts.DS, globalLogger, promReporter, legacyEVMTelemReporter, loopTelemReporter)
+	srvcs = append(srvcs, headReporter)
 	for _, chain := range legacyEVMChains.Slice() {
-		chain.HeadBroadcaster().Subscribe(promReporter)
-		chain.TxManager().RegisterResumeCallback(pipelineRunner.ResumeRun)
+		legacyChain, ok := chain.(legacyevm.Chain)
+		if !ok {
+			continue
+		}
+		legacyChain.HeadBroadcaster().Subscribe(headReporter)
+		legacyChain.TxManager().RegisterResumeCallback(pipelineRunner.ResumeRun)
 	}
 
 	srvcs = append(srvcs, pipelineORM)
+
+	loopRegistrarConfig := plugins.NewRegistrarConfig(opts.GRPCOpts, loopRegistry.Register, loopRegistry.Unregister)
 
 	var (
 		delegates = map[job.Type]job.Delegate{
@@ -386,20 +577,15 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 
 	delegates[job.Workflow] = workflows.NewDelegate(
 		globalLogger,
-		registry,
-		legacyEVMChains,
-		func() *p2ptypes.PeerID {
-			if externalPeerWrapper == nil {
-				return nil
-			}
-
-			peerID := externalPeerWrapper.GetPeer().ID()
-			return &peerID
-		},
+		opts.CapabilitiesRegistry,
+		workflowORM,
+		creServices.workflowRateLimiter,
+		creServices.workflowLimits,
+		workflows.WithBillingClient(billingClient),
 	)
 
 	// Flux monitor requires ethereum just to boot, silence errors with a null delegate
-	if !cfg.EVMRPCEnabled() {
+	if !cfg.EVMConfigs().RPCEnabled() {
 		delegates[job.FluxMonitor] = &job.NullDelegate{Type: job.FluxMonitor}
 	} else {
 		delegates[job.FluxMonitor] = fluxmonitorv2.NewDelegate(
@@ -424,14 +610,32 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 		peerWrapper = ocrcommon.NewSingletonPeerWrapper(keyStore, cfg.P2P(), cfg.OCR(), opts.DS, globalLogger)
 		srvcs = append(srvcs, peerWrapper)
 	} else {
-		return nil, fmt.Errorf("P2P stack required for OCR or OCR2")
+		return nil, errors.New("P2P stack required for OCR or OCR2")
 	}
+
+	// If peer wrapper is initialized, Oracle Factory dependency will be available to standard capabilities
+	delegates[job.StandardCapabilities] = standardcapabilities.NewDelegate(
+		globalLogger,
+		opts.DS, jobORM,
+		opts.CapabilitiesRegistry,
+		loopRegistrarConfig,
+		telemetryManager,
+		pipelineRunner,
+		relayChainInterops,
+		creServices.gatewayConnectorWrapper,
+		keyStore,
+		creServices.externalPeerWrapper,
+		peerWrapper,
+		opts.NewOracleFactoryFn,
+		opts.FetcherFactoryFn,
+	)
 
 	if cfg.OCR().Enabled() {
 		delegates[job.OffchainReporting] = ocr.NewDelegate(
 			opts.DS,
 			jobORM,
-			keyStore,
+			keyStore.Eth(),
+			keyStore.OCR(),
 			pipelineRunner,
 			peerWrapper,
 			telemetryManager,
@@ -444,32 +648,32 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 		globalLogger.Debug("Off-chain reporting disabled")
 	}
 
-	loopRegistrarConfig := plugins.NewRegistrarConfig(opts.GRPCOpts, opts.LoopRegistry.Register, opts.LoopRegistry.Unregister)
-
 	if cfg.OCR2().Enabled() {
 		globalLogger.Debug("Off-chain reporting v2 enabled")
 
 		ocr2DelegateConfig := ocr2.NewDelegateConfig(cfg.OCR2(), cfg.Mercury(), cfg.Threshold(), cfg.Insecure(), cfg.JobPipeline(), loopRegistrarConfig)
 
 		delegates[job.OffchainReporting2] = ocr2.NewDelegate(
-			opts.DS,
-			jobORM,
-			bridgeORM,
-			mercuryORM,
-			pipelineRunner,
-			streamRegistry,
-			peerWrapper,
-			telemetryManager,
-			legacyEVMChains,
-			globalLogger,
+			ocr2.DelegateOpts{
+				Ds:                             opts.DS,
+				JobORM:                         jobORM,
+				BridgeORM:                      bridgeORM,
+				MercuryORM:                     mercuryORM,
+				PipelineRunner:                 pipelineRunner,
+				StreamRegistry:                 streamRegistry,
+				PeerWrapper:                    peerWrapper,
+				MonitoringEndpointGen:          telemetryManager,
+				LegacyChains:                   legacyEVMChains,
+				Lggr:                           globalLogger,
+				Ks:                             keyStore.OCR2(),
+				EthKs:                          keyStore.Eth(),
+				Relayers:                       relayChainInterops,
+				MailMon:                        mailMon,
+				CapabilitiesRegistry:           opts.CapabilitiesRegistry,
+				RetirementReportCache:          opts.RetirementReportCache,
+				GatewayConnectorServiceWrapper: creServices.gatewayConnectorWrapper,
+			},
 			ocr2DelegateConfig,
-			keyStore.OCR2(),
-			keyStore.DKGSign(),
-			keyStore.DKGEncrypt(),
-			keyStore.Eth(),
-			opts.RelayerChainInteroperators,
-			mailMon,
-			registry,
 		)
 		delegates[job.Bootstrap] = ocrbootstrap.NewDelegateBootstrap(
 			opts.DS,
@@ -478,7 +682,19 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 			globalLogger,
 			cfg.OCR2(),
 			cfg.Insecure(),
-			opts.RelayerChainInteroperators,
+			relayChainInterops,
+		)
+		delegates[job.CCIP] = ccip.NewDelegate(
+			globalLogger,
+			loopRegistrarConfig,
+			pipelineRunner,
+			relayChainInterops,
+			opts.KeyStore,
+			opts.DS,
+			peerWrapper,
+			telemetryManager,
+			cfg.Capabilities(),
+			cfg.EVMConfigs(),
 		)
 	} else {
 		globalLogger.Debug("Off-chain reporting v2 disabled")
@@ -488,7 +704,11 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 
 	var lbs []utils.DependentAwaiter
 	for _, c := range legacyEVMChains.Slice() {
-		lbs = append(lbs, c.LogBroadcaster())
+		legacyChain, ok := c.(legacyevm.Chain)
+		if !ok {
+			continue
+		}
+		lbs = append(lbs, legacyChain.LogBroadcaster())
 	}
 	jobSpawner := job.NewSpawner(jobORM, cfg.Database(), healthChecker, delegates, globalLogger, lbs)
 	srvcs = append(srvcs, jobSpawner, pipelineRunner)
@@ -497,13 +717,17 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 	// so jobs have a chance to apply their initial log filters.
 	if cfg.Feature().LogPoller() {
 		for _, c := range legacyEVMChains.Slice() {
-			srvcs = append(srvcs, c.LogPoller())
+			legacyChain, ok := c.(legacyevm.Chain)
+			if !ok {
+				continue
+			}
+			srvcs = append(srvcs, legacyChain.LogPoller())
 		}
 	}
 
 	var feedsService feeds.Service
 	if cfg.Feature().FeedsManager() {
-		feedsORM := feeds.NewORM(opts.DS)
+		feedsORM := feeds.NewORM(opts.DS, globalLogger)
 		feedsService = feeds.NewService(
 			feedsORM,
 			jobORM,
@@ -511,6 +735,7 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 			jobSpawner,
 			keyStore,
 			cfg,
+			cfg.Feature(),
 			cfg.Insecure(),
 			cfg.JobPipeline(),
 			cfg.OCR(),
@@ -534,7 +759,7 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 	}
 
 	return &ChainlinkApplication{
-		relayers:                 opts.RelayerChainInteroperators,
+		relayers:                 relayChainInterops,
 		jobORM:                   jobORM,
 		jobSpawner:               jobSpawner,
 		pipelineRunner:           pipelineRunner,
@@ -550,7 +775,6 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 		SessionReaper:            sessionReaper,
 		ExternalInitiatorManager: externalInitiatorManager,
 		HealthChecker:            healthChecker,
-		Nurse:                    nurse,
 		logger:                   globalLogger,
 		AuditLogger:              auditLogger,
 		closeLogger:              opts.CloseLogger,
@@ -563,6 +787,251 @@ func NewApplication(opts ApplicationOpts) (Application, error) {
 
 		// NOTE: Can keep things clean by putting more things in srvcs instead of manually start/closing
 		srvcs: srvcs,
+	}, nil
+}
+
+// creKeystore is the minimal interface needed from keystore for CRE
+type creKeystore interface {
+	Eth() keystore.Eth
+	P2P() keystore.P2P
+	Workflow() keystore.Workflow
+}
+
+// CREOpts are the options for the CRE services that are exposed by the application
+type CREOpts struct {
+	CapabilitiesRegistry    *capabilities.Registry
+	CapabilitiesDispatcher  remotetypes.Dispatcher
+	CapabilitiesPeerWrapper p2ptypes.PeerWrapper
+
+	FetcherFunc      artifacts.FetcherFunc
+	FetcherFactoryFn compute.FetcherFactory
+
+	BillingClient metering.BillingClient
+}
+
+// creServiceConfig contains the configuration required to create the CRE services
+type creServiceConfig struct {
+	CREOpts
+
+	capabilityCfg        config.Capabilities
+	workflowsCfg         config.Workflows
+	keystore             creKeystore
+	logger               logger.Logger
+	relayerChainInterops *CoreRelayerChainInteroperators
+	DS                   sqlutil.DataSource
+}
+
+type CREServices struct {
+	// workflowRateLimiter is the rate limiter for workflows
+	// it is exposed because there are contingent services in the application
+	workflowRateLimiter *ratelimiter.RateLimiter
+
+	// workflowLimits is the syncer limiter for workflows
+	// it will specify the amount of global an per owner workflows that can be registered
+	workflowLimits *syncerlimiter.Limits
+
+	// gatewayConnectorWrapper is the wrapper for the gateway connector
+	// it is exposed because there are contingent services in the application
+	gatewayConnectorWrapper *gatewayconnector.ServiceWrapper
+
+	// externalPeerWrapper is the wrapper for external peering
+	// it is exposed because there are contingent services in the application
+	externalPeerWrapper p2ptypes.PeerWrapper
+
+	// srvs are all the services that are created, including those that are explicitly exposed
+	srvs []services.ServiceCtx
+}
+
+func newCREServices(
+	ctx context.Context,
+	globalLogger logger.Logger,
+	ds sqlutil.DataSource,
+	keyStore creKeystore,
+	capCfg config.Capabilities,
+	wCfg config.Workflows,
+	relayerChainInterops *CoreRelayerChainInteroperators,
+	opts CREOpts,
+	billingClient metering.BillingClient,
+) (*CREServices, error) {
+	var srvcs []services.ServiceCtx
+	workflowRateLimiter, err := ratelimiter.NewRateLimiter(ratelimiter.Config{
+		GlobalRPS:      capCfg.RateLimit().GlobalRPS(),
+		GlobalBurst:    capCfg.RateLimit().GlobalBurst(),
+		PerSenderRPS:   capCfg.RateLimit().PerSenderRPS(),
+		PerSenderBurst: capCfg.RateLimit().PerSenderBurst(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("could not instantiate workflow rate limiter: %w", err)
+	}
+
+	if len(wCfg.Limits().PerOwnerOverrides()) > 0 {
+		globalLogger.Debugw("loaded per owner overrides", "overrides", wCfg.Limits().PerOwnerOverrides())
+	}
+
+	workflowLimits, err := syncerlimiter.NewWorkflowLimits(globalLogger, syncerlimiter.Config{
+		Global:            wCfg.Limits().Global(),
+		PerOwner:          wCfg.Limits().PerOwner(),
+		PerOwnerOverrides: wCfg.Limits().PerOwnerOverrides(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("could not instantiate workflow syncer limiter: %w", err)
+	}
+
+	var gatewayConnectorWrapper *gatewayconnector.ServiceWrapper
+	if capCfg.GatewayConnector().DonID() != "" {
+		globalLogger.Debugw("Creating GatewayConnector wrapper", "donID", capCfg.GatewayConnector().DonID())
+		chainID, ok := new(big.Int).SetString(capCfg.GatewayConnector().ChainIDForNodeKey(), 0)
+		if !ok {
+			return nil, fmt.Errorf("failed to parse gateway connector chain ID as integer: %s", capCfg.GatewayConnector().ChainIDForNodeKey())
+		}
+		gatewayConnectorWrapper = gatewayconnector.NewGatewayConnectorServiceWrapper(
+			capCfg.GatewayConnector(),
+			keys.NewStore(keystore.NewEthSigner(keyStore.Eth(), chainID)),
+			clockwork.NewRealClock(),
+			globalLogger)
+		srvcs = append(srvcs, gatewayConnectorWrapper)
+	}
+
+	var externalPeerWrapper p2ptypes.PeerWrapper
+	if capCfg.Peering().Enabled() {
+		var dispatcher remotetypes.Dispatcher
+		if opts.CapabilitiesDispatcher == nil {
+			externalPeer := externalp2p.NewExternalPeerWrapper(keyStore.P2P(), capCfg.Peering(), ds, globalLogger)
+			signer := externalPeer
+			externalPeerWrapper = externalPeer
+			remoteDispatcher, err := remote.NewDispatcher(capCfg.Dispatcher(), externalPeerWrapper, signer, opts.CapabilitiesRegistry, globalLogger)
+			if err != nil {
+				return nil, fmt.Errorf("could not create dispatcher: %w", err)
+			}
+			dispatcher = remoteDispatcher
+		} else {
+			dispatcher = opts.CapabilitiesDispatcher
+			externalPeerWrapper = opts.CapabilitiesPeerWrapper
+		}
+
+		srvcs = append(srvcs, externalPeerWrapper, dispatcher)
+
+		if capCfg.ExternalRegistry().Address() != "" {
+			rid := capCfg.ExternalRegistry().RelayID()
+			registryAddress := capCfg.ExternalRegistry().Address()
+			relayer, err := relayerChainInterops.Get(rid)
+			if err != nil {
+				return nil, fmt.Errorf("could not fetch relayer %s configured for capabilities registry: %w", rid, err)
+			}
+			registrySyncer, err := registrysyncer.New(
+				globalLogger,
+				func() (p2ptypes.PeerID, error) {
+					p := externalPeerWrapper.GetPeer()
+					if p == nil {
+						return p2ptypes.PeerID{}, errors.New("could not get peer")
+					}
+
+					return p.ID(), nil
+				},
+				relayer,
+				registryAddress,
+				registrysyncer.NewORM(ds, globalLogger),
+			)
+			if err != nil {
+				return nil, fmt.Errorf("could not configure syncer: %w", err)
+			}
+
+			workflowDonNotifier := capabilities.NewDonNotifier()
+
+			wfLauncher := capabilities.NewLauncher(
+				globalLogger,
+				externalPeerWrapper,
+				dispatcher,
+				opts.CapabilitiesRegistry,
+				workflowDonNotifier,
+			)
+			registrySyncer.AddLauncher(wfLauncher)
+
+			srvcs = append(srvcs, wfLauncher, registrySyncer)
+
+			if capCfg.WorkflowRegistry().Address() != "" {
+				lggr := globalLogger.Named("WorkflowRegistrySyncer")
+				var fetcherFunc artifacts.FetcherFunc
+				if opts.FetcherFunc == nil {
+					if gatewayConnectorWrapper == nil {
+						return nil, errors.New("unable to create workflow registry syncer without gateway connector")
+					}
+					fetcher := syncer.NewFetcherService(lggr, gatewayConnectorWrapper)
+					fetcherFunc = fetcher.Fetch
+					srvcs = append(srvcs, fetcher)
+				} else {
+					fetcherFunc = opts.FetcherFunc
+				}
+
+				key, err := keystore.GetDefault(ctx, keyStore.Workflow())
+				if err != nil {
+					return nil, fmt.Errorf("failed to get all workflow keys: %w", err)
+				}
+
+				artifactsStore := artifacts.NewStore(lggr, artifacts.NewWorkflowRegistryDS(ds, globalLogger),
+					fetcherFunc,
+					clockwork.NewRealClock(), key, custmsg.NewLabeler(), artifacts.WithMaxArtifactSize(
+						artifacts.ArtifactConfig{
+							MaxBinarySize:  uint64(capCfg.WorkflowRegistry().MaxBinarySize()),
+							MaxSecretsSize: uint64(capCfg.WorkflowRegistry().MaxEncryptedSecretsSize()),
+							MaxConfigSize:  uint64(capCfg.WorkflowRegistry().MaxConfigSize()),
+						},
+					))
+
+				engineRegistry := syncer.NewEngineRegistry()
+
+				eventHandler, err := syncer.NewEventHandler(
+					lggr,
+					workflowstore.NewInMemoryStore(lggr, clockwork.NewRealClock()),
+					opts.CapabilitiesRegistry,
+					engineRegistry,
+					custmsg.NewLabeler(),
+					workflowRateLimiter,
+					workflowLimits,
+					artifactsStore,
+					syncer.WithBillingClient(billingClient),
+				)
+				if err != nil {
+					return nil, fmt.Errorf("unable to create workflow registry event handler: %w", err)
+				}
+
+				globalLogger.Debugw("Creating WorkflowRegistrySyncer")
+				wfRegRid := capCfg.WorkflowRegistry().RelayID()
+				wfRegRelayer, err := relayerChainInterops.Get(wfRegRid)
+				if err != nil {
+					return nil, fmt.Errorf("could not fetch relayer %s configured for workflow registry: %w", rid, err)
+				}
+				wfSyncer, err := syncer.NewWorkflowRegistry(
+					lggr,
+					func(ctx context.Context, bytes []byte) (syncer.ContractReader, error) {
+						return wfRegRelayer.NewContractReader(ctx, bytes)
+					},
+					capCfg.WorkflowRegistry().Address(),
+					syncer.Config{
+						QueryCount:   100,
+						SyncStrategy: syncer.SyncStrategy(capCfg.WorkflowRegistry().SyncStrategy()),
+					},
+					eventHandler,
+					workflowDonNotifier,
+					engineRegistry,
+				)
+				if err != nil {
+					return nil, fmt.Errorf("unable to create workflow registry syncer: %w", err)
+				}
+
+				srvcs = append(srvcs, wfSyncer)
+			}
+		}
+	} else {
+		globalLogger.Debug("External registry not configured, skipping registry syncer and starting with an empty registry")
+		opts.CapabilitiesRegistry.SetLocalRegistry(&capabilities.TestMetadataRegistry{})
+	}
+	return &CREServices{
+		workflowRateLimiter:     workflowRateLimiter,
+		workflowLimits:          workflowLimits,
+		gatewayConnectorWrapper: gatewayConnectorWrapper,
+		externalPeerWrapper:     externalPeerWrapper,
+		srvs:                    srvcs,
 	}, nil
 }
 
@@ -583,6 +1052,14 @@ func (app *ChainlinkApplication) Start(ctx context.Context) error {
 		panic("application is already started")
 	}
 
+	var span trace.Span
+	ctx, span = otel.Tracer("").Start(ctx, "Start", trace.WithAttributes(
+		attribute.String("app-id", app.ID().String()),
+		attribute.String("version", static.Version),
+		attribute.String("commit", static.Sha),
+	))
+	defer span.End()
+
 	if app.FeedsService != nil {
 		if err := app.FeedsService.Start(ctx); err != nil {
 			app.logger.Errorf("[Feeds Service] Failed to start %v", err)
@@ -597,7 +1074,7 @@ func (app *ChainlinkApplication) Start(ctx context.Context) error {
 			return multierr.Combine(err, ms.Close())
 		}
 
-		app.logger.Debugw("Starting service...", "name", service.Name())
+		app.logger.Infow("Starting service...", "name", service.Name())
 
 		if err := ms.Start(ctx, service); err != nil {
 			return err
@@ -644,6 +1121,7 @@ func (app *ChainlinkApplication) stop() (err error) {
 		panic("application is already stopped")
 	}
 	app.shutdownOnce.Do(func() {
+		shutdownStart := time.Now()
 		defer func() {
 			if app.closeLogger == nil {
 				return
@@ -670,15 +1148,11 @@ func (app *ChainlinkApplication) stop() (err error) {
 			err = multierr.Append(err, app.FeedsService.Close())
 		}
 
-		if app.Nurse != nil {
-			err = multierr.Append(err, app.Nurse.Close())
-		}
-
 		if app.profiler != nil {
 			err = multierr.Append(err, app.profiler.Stop())
 		}
 
-		app.logger.Info("Exited all services")
+		app.logger.Debugf("Closed application in %v", time.Since(shutdownStart))
 
 		app.started = false
 	})
@@ -723,11 +1197,6 @@ func (app *ChainlinkApplication) BasicAdminUsersORM() sessions.BasicAdminUsersOR
 
 func (app *ChainlinkApplication) AuthenticationProvider() sessions.AuthenticationProvider {
 	return app.authenticationProvider
-}
-
-// TODO BCF-2516 remove this all together remove EVM specifics
-func (app *ChainlinkApplication) EVMORM() evmtypes.Configs {
-	return app.GetRelayers().LegacyEVMChains().ChainNodeConfigs()
 }
 
 func (app *ChainlinkApplication) PipelineORM() pipeline.ORM {
@@ -802,7 +1271,7 @@ func (app *ChainlinkApplication) RunJobV2(
 					common.BigToHash(big.NewInt(42)).Bytes(), // seed
 					evmutils.NewHash().Bytes(),               // sender
 					evmutils.NewHash().Bytes(),               // fee
-					evmutils.NewHash().Bytes()},              // requestID
+					evmutils.NewHash().Bytes()}, // requestID
 					[]byte{}),
 				Topics:      []common.Hash{{}, jb.ExternalIDEncodeBytesToTopic()}, // jobID BYTES
 				TxHash:      evmutils.NewHash(),
@@ -833,7 +1302,7 @@ func (app *ChainlinkApplication) RunJobV2(
 				},
 			}
 		}
-		runID, _, err = app.pipelineRunner.ExecuteAndInsertFinishedRun(ctx, *jb.PipelineSpec, pipeline.NewVarsFrom(vars), app.logger, saveTasks)
+		runID, _, err = app.pipelineRunner.ExecuteAndInsertFinishedRun(ctx, *jb.PipelineSpec, pipeline.NewVarsFrom(vars), saveTasks)
 	}
 	return runID, err
 }
@@ -851,16 +1320,33 @@ func (app *ChainlinkApplication) GetFeedsService() feeds.Service {
 }
 
 // ReplayFromBlock implements the Application interface.
-func (app *ChainlinkApplication) ReplayFromBlock(chainID *big.Int, number uint64, forceBroadcast bool) error {
-	chain, err := app.GetRelayers().LegacyEVMChains().Get(chainID.String())
+func (app *ChainlinkApplication) ReplayFromBlock(ctx context.Context, chainFamily string, chainID string, number uint64, forceBroadcast bool) error {
+	if chainFamily == relay.NetworkEVM {
+		// TODO: Implement EVM Replay on Relayer instead of using LegacyChains - BCFR-1160
+		chain, err := app.GetRelayers().LegacyEVMChains().Get(chainID)
+		if err != nil {
+			return err
+		}
+		//nolint:gosec // this won't overflow
+		fromBlock := int64(number)
+
+		if legacyChain, ok := chain.(legacyevm.Chain); ok {
+			legacyChain.LogBroadcaster().ReplayFromBlock(fromBlock, forceBroadcast)
+			if app.Config.Feature().LogPoller() {
+				legacyChain.LogPoller().ReplayAsync(fromBlock)
+			}
+			return nil
+		}
+		// else LOOPP mode, so fall back to default
+	}
+	relayer, err := app.GetRelayers().Get(commontypes.RelayID{
+		Network: chainFamily,
+		ChainID: chainID,
+	})
 	if err != nil {
 		return err
 	}
-	chain.LogBroadcaster().ReplayFromBlock(int64(number), forceBroadcast)
-	if app.Config.Feature().LogPoller() {
-		chain.LogPoller().ReplayAsync(int64(number))
-	}
-	return nil
+	return relayer.Replay(ctx, strconv.FormatUint(number, 10), map[string]any{})
 }
 
 func (app *ChainlinkApplication) GetRelayers() RelayerChainInteroperators {
@@ -894,17 +1380,23 @@ func (app *ChainlinkApplication) ID() uuid.UUID {
 	return app.Config.AppID()
 }
 
+var ErrUnsupportedInLOOPPMode = fmt.Errorf("legacy command not available in LOOP Plugin mode: %w", stderrors.ErrUnsupported)
+
 // FindLCA - finds last common ancestor
-func (app *ChainlinkApplication) FindLCA(ctx context.Context, chainID *big.Int) (*logpoller.LogPollerBlock, error) {
+func (app *ChainlinkApplication) FindLCA(ctx context.Context, chainID *big.Int) (*logpoller.Block, error) {
 	chain, err := app.GetRelayers().LegacyEVMChains().Get(chainID.String())
 	if err != nil {
 		return nil, err
 	}
 	if !app.Config.Feature().LogPoller() {
-		return nil, fmt.Errorf("FindLCA is only available if LogPoller is enabled")
+		return nil, errors.New("FindLCA is only available if LogPoller is enabled")
+	}
+	legacyChain, ok := chain.(legacyevm.Chain)
+	if !ok {
+		return nil, ErrUnsupportedInLOOPPMode
 	}
 
-	lca, err := chain.LogPoller().FindLCA(ctx)
+	lca, err := legacyChain.LogPoller().FindLCA(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find lca: %w", err)
 	}
@@ -919,10 +1411,14 @@ func (app *ChainlinkApplication) DeleteLogPollerDataAfter(ctx context.Context, c
 		return err
 	}
 	if !app.Config.Feature().LogPoller() {
-		return fmt.Errorf("DeleteLogPollerDataAfter is only available if LogPoller is enabled")
+		return errors.New("DeleteLogPollerDataAfter is only available if LogPoller is enabled")
+	}
+	legacyChain, ok := chain.(legacyevm.Chain)
+	if !ok {
+		return ErrUnsupportedInLOOPPMode
 	}
 
-	err = chain.LogPoller().DeleteLogsAndBlocksAfter(ctx, start)
+	err = legacyChain.LogPoller().DeleteLogsAndBlocksAfter(ctx, start)
 	if err != nil {
 		return fmt.Errorf("failed to recover LogPoller: %w", err)
 	}

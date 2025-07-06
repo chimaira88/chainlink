@@ -2,91 +2,133 @@ package llo
 
 import (
 	"context"
-	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
 
-	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/smartcontractkit/libocr/offchainreporting2/chains/evmutil"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/ocr3types"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 	ocr2types "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
+	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
+	"golang.org/x/sync/errgroup"
 
+	"github.com/smartcontractkit/chainlink/v2/core/services/llo/cre"
+	"github.com/smartcontractkit/chainlink/v2/core/services/llo/mercurytransmitter"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/llo/config"
+
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
+	coretypes "github.com/smartcontractkit/chainlink-common/pkg/types/core"
 	llotypes "github.com/smartcontractkit/chainlink-common/pkg/types/llo"
-
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ocr2key"
-	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc"
-	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc/pb"
 )
 
 // LLO Transmitter implementation, based on
 // core/services/relay/evm/mercury/transmitter.go
-
-// TODO: prom metrics (common with mercury/transmitter.go?)
-// https://smartcontract-it.atlassian.net/browse/MERC-3659
+//
+// If you need to "fan-out" transmits and send reports to a new destination,
+// add a new subTransmitter
 
 const (
 	// Mercury server error codes
 	DuplicateReport = 2
-	// TODO: revisit these values in light of parallel composition
-	// https://smartcontract-it.atlassian.net/browse/MERC-3659
-	// maxTransmitQueueSize = 10_000
-	// maxDeleteQueueSize   = 10_000
-	// transmitTimeout      = 5 * time.Second
 )
-
-var PayloadTypes = getPayloadTypes()
-
-func getPayloadTypes() abi.Arguments {
-	mustNewType := func(t string) abi.Type {
-		result, err := abi.NewType(t, "", []abi.ArgumentMarshaling{})
-		if err != nil {
-			panic(fmt.Sprintf("Unexpected error during abi.NewType: %s", err))
-		}
-		return result
-	}
-	return abi.Arguments([]abi.Argument{
-		{Name: "reportContext", Type: mustNewType("bytes32[2]")},
-		{Name: "report", Type: mustNewType("bytes")},
-		{Name: "rawRs", Type: mustNewType("bytes32[]")},
-		{Name: "rawSs", Type: mustNewType("bytes32[]")},
-		{Name: "rawVs", Type: mustNewType("bytes32")},
-	})
-}
 
 type Transmitter interface {
 	llotypes.Transmitter
 	services.Service
 }
 
-type transmitter struct {
-	services.StateMachine
-	lggr        logger.Logger
-	rpcClient   wsrpc.Client
-	fromAccount string
+type TransmitterRetirementReportCacheWriter interface {
+	StoreAttestedRetirementReport(ctx context.Context, cd ocrtypes.ConfigDigest, seqNr uint64, retirementReport []byte, sigs []types.AttributedOnchainSignature) error
 }
 
-func NewTransmitter(lggr logger.Logger, rpcClient wsrpc.Client, fromAccount ed25519.PublicKey) Transmitter {
+type transmitter struct {
+	services.StateMachine
+	lggr           logger.Logger
+	verboseLogging bool
+	fromAccount    string
+
+	subTransmitters       []Transmitter
+	retirementReportCache TransmitterRetirementReportCacheWriter
+}
+
+type TransmitterOpts struct {
+	Lggr                   logger.Logger
+	DonID                  uint32
+	VerboseLogging         bool
+	FromAccount            string
+	MercuryTransmitterOpts *mercurytransmitter.Opts
+	Subtransmitters        []config.TransmitterConfig
+	RetirementReportCache  TransmitterRetirementReportCacheWriter
+	CapabilitiesRegistry   coretypes.CapabilitiesRegistry
+}
+
+// The transmitter will handle starting and stopping the subtransmitters
+func NewTransmitter(opts TransmitterOpts) (Transmitter, error) {
+	subTransmitters := []Transmitter{}
+
+	if opts.MercuryTransmitterOpts != nil {
+		subTransmitters = append(
+			subTransmitters,
+			mercurytransmitter.New(*opts.MercuryTransmitterOpts),
+		)
+	}
+	for _, cfg := range opts.Subtransmitters {
+		switch cfg.Type {
+		case config.TransmitterTypeCRE:
+			var creTransmitterCfg cre.TransmitterConfig
+			err := json.Unmarshal(cfg.Opts, &creTransmitterCfg)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unmarshal CRE transmitter config: %w", err)
+			}
+			creTransmitterCfg.Logger = opts.Lggr
+			creTransmitterCfg.CapabilitiesRegistry = opts.CapabilitiesRegistry
+			creTransmitterCfg.DonID = opts.DonID
+			creTransmitter, err := creTransmitterCfg.NewTransmitter()
+			if err != nil {
+				return nil, fmt.Errorf("failed to create CRE transmitter: %w", err)
+			}
+			subTransmitters = append(subTransmitters, creTransmitter)
+		default:
+			return nil, fmt.Errorf("unknown transmitter type: %s", cfg.Type)
+		}
+	}
 	return &transmitter{
 		services.StateMachine{},
-		lggr,
-		rpcClient,
-		fmt.Sprintf("%x", fromAccount),
-	}
+		opts.Lggr,
+		opts.VerboseLogging,
+		opts.FromAccount,
+		subTransmitters,
+		opts.RetirementReportCache,
+	}, nil
 }
 
 func (t *transmitter) Start(ctx context.Context) error {
-	return nil
+	return t.StartOnce("llo.Transmitter", func() error {
+		for _, st := range t.subTransmitters {
+			if err := st.Start(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (t *transmitter) Close() error {
-	return nil
+	return t.StopOnce("llo.Transmitter", func() error {
+		for _, st := range t.subTransmitters {
+			if err := st.Close(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (t *transmitter) HealthReport() map[string]error {
 	report := map[string]error{t.Name(): t.Healthy()}
-	services.CopyHealth(report, t.rpcClient.HealthReport())
+	for _, st := range t.subTransmitters {
+		services.CopyHealth(report, st.HealthReport())
+	}
 	return report
 }
 
@@ -99,55 +141,29 @@ func (t *transmitter) Transmit(
 	report ocr3types.ReportWithInfo[llotypes.ReportInfo],
 	sigs []types.AttributedOnchainSignature,
 ) (err error) {
-	var payload []byte
-
-	switch report.Info.ReportFormat {
-	case llotypes.ReportFormatJSON:
-		fallthrough
-	case llotypes.ReportFormatEVM:
-		payload, err = encodeEVM(digest, seqNr, report.Report, sigs)
-	default:
-		return fmt.Errorf("Transmit failed; unsupported report format: %q", report.Info.ReportFormat)
+	if t.verboseLogging {
+		t.lggr.Debugw("Transmit report", "digest", digest, "seqNr", seqNr, "report", report, "sigs", sigs)
 	}
 
-	if err != nil {
-		return fmt.Errorf("Transmit: encode failed; %w", err)
-	}
-
-	req := &pb.TransmitRequest{
-		Payload:      payload,
-		ReportFormat: uint32(report.Info.ReportFormat),
-	}
-
-	// TODO: persistenceManager and queueing, error handling, retry etc
-	// https://smartcontract-it.atlassian.net/browse/MERC-3659
-	_, err = t.rpcClient.Transmit(ctx, req)
-	return err
-}
-
-func encodeEVM(digest types.ConfigDigest, seqNr uint64, report ocr2types.Report, sigs []types.AttributedOnchainSignature) ([]byte, error) {
-	var rs [][32]byte
-	var ss [][32]byte
-	var vs [32]byte
-	for i, as := range sigs {
-		r, s, v, err := evmutil.SplitSignature(as.Signature)
-		if err != nil {
-			return nil, fmt.Errorf("eventTransmit(ev): error in SplitSignature: %w", err)
+	if report.Info.ReportFormat == llotypes.ReportFormatRetirement {
+		// Retirement reports don't get transmitted; rather, they are stored in
+		// the RetirementReportCache
+		t.lggr.Debugw("Storing retirement report", "digest", digest, "seqNr", seqNr)
+		if err := t.retirementReportCache.StoreAttestedRetirementReport(ctx, digest, seqNr, report.Report, sigs); err != nil {
+			return fmt.Errorf("failed to write retirement report to cache: %w", err)
 		}
-		rs = append(rs, r)
-		ss = append(ss, s)
-		vs[i] = v
+		return nil
 	}
-	rawReportCtx := ocr2key.RawReportContext3(digest, seqNr)
-
-	payload, err := PayloadTypes.Pack(rawReportCtx, []byte(report), rs, ss, vs)
-	if err != nil {
-		return nil, fmt.Errorf("abi.Pack failed; %w", err)
+	g := new(errgroup.Group)
+	for _, st := range t.subTransmitters {
+		g.Go(func() error {
+			return st.Transmit(ctx, digest, seqNr, report, sigs)
+		})
 	}
-	return payload, nil
+	return g.Wait()
 }
 
 // FromAccount returns the stringified (hex) CSA public key
-func (t *transmitter) FromAccount() (ocr2types.Account, error) {
+func (t *transmitter) FromAccount(ctx context.Context) (ocr2types.Account, error) {
 	return ocr2types.Account(t.fromAccount), nil
 }

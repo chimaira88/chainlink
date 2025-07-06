@@ -2,26 +2,38 @@ package workflows
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/pelletier/go-toml"
 
-	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
+	"github.com/smartcontractkit/chainlink-common/pkg/custmsg"
+
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
-	"github.com/smartcontractkit/chainlink/v2/core/capabilities/targets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
+
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/platform"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
-	p2ptypes "github.com/smartcontractkit/chainlink/v2/core/services/p2p/types"
+	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/metering"
+	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/ratelimiter"
+	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/store"
+	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/syncerlimiter"
 )
 
+func WithBillingClient(client metering.BillingClient) func(*Delegate) {
+	return func(e *Delegate) {
+		e.billingClient = client
+	}
+}
+
 type Delegate struct {
-	registry        core.CapabilitiesRegistry
-	logger          logger.Logger
-	legacyEVMChains legacyevm.LegacyChainContainer
-	peerID          func() *p2ptypes.PeerID
+	registry       core.CapabilitiesRegistry
+	secretsFetcher SecretsFor
+	logger         logger.Logger
+	store          store.Store
+	ratelimiter    *ratelimiter.RateLimiter
+	workflowLimits *syncerlimiter.Limits
+	billingClient  metering.BillingClient
 }
 
 var _ job.Delegate = (*Delegate)(nil)
@@ -40,74 +52,68 @@ func (d *Delegate) OnDeleteJob(context.Context, job.Job) error { return nil }
 
 // ServicesForSpec satisfies the job.Delegate interface.
 func (d *Delegate) ServicesForSpec(ctx context.Context, spec job.Job) ([]job.ServiceCtx, error) {
-	// NOTE: we temporarily do registration inside ServicesForSpec, this will be moved out of job specs in the future
-	err := targets.InitializeWrite(d.registry, d.legacyEVMChains, d.logger)
+	cma := custmsg.NewLabeler().With(platform.KeyWorkflowID, spec.WorkflowSpec.WorkflowID, platform.KeyWorkflowOwner, spec.WorkflowSpec.WorkflowOwner, platform.KeyWorkflowName, spec.WorkflowSpec.WorkflowName)
+	sdkSpec, err := spec.WorkflowSpec.SDKSpec(ctx)
 	if err != nil {
-		d.logger.Errorw("could not initialize writes", err)
+		logCustMsg(ctx, cma, fmt.Sprintf("failed to start workflow engine: failed to get workflow sdk spec: %v", err), d.logger)
+		return nil, err
 	}
 
-	dinfo, err := initializeDONInfo(d.logger)
+	binary, err := spec.WorkflowSpec.RawSpec(ctx)
 	if err != nil {
-		d.logger.Errorw("could not add initialize don info", err)
+		logCustMsg(ctx, cma, fmt.Sprintf("failed to start workflow engine: failed to fetch workflow spec binary: %v", err), d.logger)
+		return nil, err
+	}
+
+	config, err := spec.WorkflowSpec.GetConfig(ctx)
+	if err != nil {
+		logCustMsg(ctx, cma, fmt.Sprintf("failed to start workflow engine: failed to get workflow spec config: %v", err), d.logger)
+		return nil, err
 	}
 
 	cfg := Config{
-		Lggr:       d.logger,
-		Spec:       spec.WorkflowSpec.Workflow,
-		WorkflowID: spec.WorkflowSpec.WorkflowID,
-		Registry:   d.registry,
-		DONInfo:    dinfo,
-		PeerID:     d.peerID,
+		Lggr:           d.logger,
+		Workflow:       sdkSpec,
+		WorkflowID:     spec.WorkflowSpec.WorkflowID,
+		WorkflowOwner:  spec.WorkflowSpec.WorkflowOwner,
+		WorkflowName:   NewLegacyWorkflowName(spec.WorkflowSpec.WorkflowName),
+		Registry:       d.registry,
+		Store:          d.store,
+		Config:         config,
+		Binary:         binary,
+		SecretsFetcher: d.secretsFetcher,
+		RateLimiter:    d.ratelimiter,
+		WorkflowLimits: d.workflowLimits,
 	}
-	engine, err := NewEngine(cfg)
+	engine, err := NewEngine(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
+	d.logger.Infow("Creating Workflow Engine for workflow spec", "workflowID", spec.WorkflowSpec.WorkflowID, "workflowOwner", spec.WorkflowSpec.WorkflowOwner, "workflowName", spec.WorkflowSpec.WorkflowName, "jobName", spec.Name)
 	return []job.ServiceCtx{engine}, nil
 }
 
-func initializeDONInfo(lggr logger.Logger) (*capabilities.DON, error) {
-	var key [16]byte
-
-	// TODO: fetch the key and DONInfo from the registry
-	keyString := "44fb5c1ee8ee48846c808a383da3aba3"
-	k, err := hex.DecodeString(keyString)
-	if err != nil {
-		lggr.Errorf("could not decode key %s: %w", keyString, err)
-	}
-	key = [16]byte(k)
-
-	p2pStrings := []string{
-		"12D3KooWBCF1XT5Wi8FzfgNCqRL76Swv8TRU3TiD4QiJm8NMNX7N",
-		"12D3KooWG1AyvwmCpZ93J8pBQUE1SuzrjDXnT4BeouncHR3jWLCG",
-		"12D3KooWGeUKZBRMbx27FUTgBwZa9Ap9Ym92mywwpuqkEtz8XWyv",
-		"12D3KooW9zYWQv3STmDeNDidyzxsJSTxoCTLicafgfeEz9nhwhC4",
-	}
-
-	p2pIDs := []p2ptypes.PeerID{}
-	for _, p := range p2pStrings {
-		pid := p2ptypes.PeerID{}
-		err := pid.UnmarshalText([]byte(p))
-		if err != nil {
-			return nil, err
-		}
-
-		p2pIDs = append(p2pIDs, pid)
-	}
-
-	return &capabilities.DON{
-		Members: p2pIDs,
-		Config: capabilities.DONConfig{
-			SharedSecret: key,
+func NewDelegate(
+	logger logger.Logger,
+	registry core.CapabilitiesRegistry,
+	store store.Store,
+	ratelimiter *ratelimiter.RateLimiter,
+	workflowLimits *syncerlimiter.Limits,
+	opts ...func(*Delegate),
+) *Delegate {
+	return &Delegate{
+		logger:   logger,
+		registry: registry,
+		secretsFetcher: func(ctx context.Context, workflowOwner, hexWorkflowName, decodedWorkflowName, workflowID string) (map[string]string, error) {
+			return map[string]string{}, nil
 		},
-	}, nil
+		store:          store,
+		ratelimiter:    ratelimiter,
+		workflowLimits: workflowLimits,
+	}
 }
 
-func NewDelegate(logger logger.Logger, registry core.CapabilitiesRegistry, legacyEVMChains legacyevm.LegacyChainContainer, peerID func() *p2ptypes.PeerID) *Delegate {
-	return &Delegate{logger: logger, registry: registry, legacyEVMChains: legacyEVMChains, peerID: peerID}
-}
-
-func ValidatedWorkflowSpec(tomlString string) (job.Job, error) {
+func ValidatedWorkflowJobSpec(ctx context.Context, tomlString string) (job.Job, error) {
 	var jb = job.Job{ExternalJobID: uuid.New()}
 
 	tree, err := toml.Load(tomlString)
@@ -119,21 +125,33 @@ func ValidatedWorkflowSpec(tomlString string) (job.Job, error) {
 	if err != nil {
 		return jb, fmt.Errorf("toml unmarshal error on spec: %w", err)
 	}
+	if jb.Type != job.Workflow {
+		return jb, fmt.Errorf("unsupported type %s, expected %s", jb.Type, job.Workflow)
+	}
 
 	var spec job.WorkflowSpec
 	err = tree.Unmarshal(&spec)
 	if err != nil {
-		return jb, fmt.Errorf("toml unmarshal error on job: %w", err)
+		return jb, fmt.Errorf("toml unmarshal error on workflow spec: %w", err)
 	}
 
-	if err := spec.Validate(); err != nil {
-		return jb, err
+	sdkSpec, err := spec.SDKSpec(ctx)
+	if err != nil {
+		return jb, fmt.Errorf("failed to convert to sdk workflow spec: %w", err)
+	}
+
+	// ensure the embedded workflow graph is valid
+	if _, err = Parse(sdkSpec); err != nil {
+		return jb, fmt.Errorf("failed to parse workflow graph: %w", err)
+	}
+
+	err = spec.Validate(ctx)
+	if err != nil {
+		return jb, fmt.Errorf("invalid WorkflowSpec: %w", err)
 	}
 
 	jb.WorkflowSpec = &spec
-	if jb.Type != job.Workflow {
-		return jb, fmt.Errorf("unsupported type %s", jb.Type)
-	}
+	jb.WorkflowSpecID = &spec.ID
 
 	return jb, nil
 }

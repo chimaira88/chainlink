@@ -4,13 +4,12 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	proof2 "github.com/smartcontractkit/chainlink/v2/core/services/vrf/proof"
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf/vrftesthelpers"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 )
 
 // TestMeasureFulfillmentGasCost establishes rough bounds on the cost of
@@ -34,7 +33,7 @@ func TestMeasureFulfillmentGasCost(t *testing.T) {
 	proofBlob, err := vrftesthelpers.GenerateProofResponseFromProof(proof, s)
 	require.NoError(t, err, "could not generate VRF proof!")
 	coordinator.Backend.Commit() // Work around simbackend/EVM block number bug
-	estimate := estimateGas(t, coordinator.Backend, coordinator.Neil.From,
+	estimate := estimateGas(t, coordinator.Backend.Client(), coordinator.Neil.From,
 		coordinator.RootContractAddress, coordinator.CoordinatorABI,
 		"fulfillRandomnessRequest", proofBlob[:])
 

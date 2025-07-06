@@ -3,6 +3,7 @@ package medianpoc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/smartcontractkit/libocr/offchainreporting2/reportingplugin/median"
@@ -30,8 +31,16 @@ type Plugin struct {
 	reportingplugins.MedianProviderServer
 }
 
+type PipelineNotFoundError struct {
+	Key string
+}
+
+func (e *PipelineNotFoundError) Error() string {
+	return "no pipeline found for " + e.Key
+}
+
 func (p *Plugin) NewValidationService(ctx context.Context) (core.ValidationService, error) {
-	s := &reportingPluginValidationService{lggr: p.Logger}
+	s := &reportingPluginValidationService{Service: services.Config{Name: "ValidationService"}.NewService(p.Logger)}
 	p.SubService(s)
 	return s, nil
 }
@@ -55,7 +64,7 @@ func (j jsonConfig) getPipeline(key string) (string, error) {
 			return v.Spec, nil
 		}
 	}
-	return "", fmt.Errorf("no pipeline found for %s", key)
+	return "", &PipelineNotFoundError{key}
 }
 
 func (p *Plugin) NewReportingPluginFactory(
@@ -72,7 +81,10 @@ func (p *Plugin) NewReportingPluginFactory(
 	if err != nil {
 		return nil, err
 	}
-	s := &reportingPluginFactoryService{lggr: p.Logger, ReportingPluginFactory: f}
+	s := &reportingPluginFactoryService{
+		Service:                services.Config{Name: "ReportingPluginFactory"}.NewService(p.Logger),
+		ReportingPluginFactory: f,
+	}
 	p.SubService(s)
 	return s, nil
 }
@@ -103,12 +115,39 @@ func (p *Plugin) newFactory(ctx context.Context, config core.ReportingPluginServ
 		spec:           jfp,
 		lggr:           p.Logger,
 	}
+
+	var gds median.DataSource
+	gp, err := jc.getPipeline("gasPriceSubunitsPipeline")
+
+	var pnf *PipelineNotFoundError
+	pipelineNotFound := errors.As(err, &pnf)
+	if !pipelineNotFound && err != nil {
+		return nil, err
+	}
+
+	// We omit gas price in observation to maintain backwards compatibility in libocr (with older nodes).
+	// Once all chainlink nodes have updated to libocr version >= fd3cab206b2c
+	// the IncludeGasPriceSubunitsInObservation field can be removed
+
+	var includeGasPriceSubunitsInObservation bool
+	if pipelineNotFound {
+		gds = &ZeroDataSource{}
+		includeGasPriceSubunitsInObservation = false
+	} else {
+		gds = &DataSource{
+			pipelineRunner: pipelineRunner,
+			spec:           gp,
+			lggr:           p.Logger,
+		}
+		includeGasPriceSubunitsInObservation = true
+	}
+
 	factory := &median.NumericalMedianFactory{
 		ContractTransmitter:                  provider.MedianContract(),
 		DataSource:                           ds,
 		JuelsPerFeeCoinDataSource:            jds,
-		GasPriceSubunitsDataSource:           &ZeroDataSource{},
-		IncludeGasPriceSubunitsInObservation: false,
+		GasPriceSubunitsDataSource:           gds,
+		IncludeGasPriceSubunitsInObservation: includeGasPriceSubunitsInObservation,
 		Logger: logger.NewOCRWrapper(
 			p.Logger,
 			true,
@@ -121,34 +160,18 @@ func (p *Plugin) newFactory(ctx context.Context, config core.ReportingPluginServ
 }
 
 type reportingPluginFactoryService struct {
-	services.StateMachine
-	lggr logger.Logger
+	services.Service
 	ocrtypes.ReportingPluginFactory
 }
 
-func (r *reportingPluginFactoryService) Name() string { return r.lggr.Name() }
-
-func (r *reportingPluginFactoryService) Start(ctx context.Context) error {
-	return r.StartOnce("ReportingPluginFactory", func() error { return nil })
-}
-
-func (r *reportingPluginFactoryService) Close() error {
-	return r.StopOnce("ReportingPluginFactory", func() error { return nil })
-}
-
-func (r *reportingPluginFactoryService) HealthReport() map[string]error {
-	return map[string]error{r.Name(): r.Healthy()}
-}
-
 type reportingPluginValidationService struct {
-	services.StateMachine
-	lggr logger.Logger
+	services.Service
 }
 
 func (r *reportingPluginValidationService) ValidateConfig(ctx context.Context, config map[string]interface{}) error {
 	tt, ok := config["telemetryType"]
 	if !ok {
-		return fmt.Errorf("expected telemtry type")
+		return errors.New("expected telemtry type")
 	}
 	telemetryType, ok := tt.(string)
 	if !ok {
@@ -159,17 +182,4 @@ func (r *reportingPluginValidationService) ValidateConfig(ctx context.Context, c
 	}
 
 	return nil
-}
-func (r *reportingPluginValidationService) Name() string { return r.lggr.Name() }
-
-func (r *reportingPluginValidationService) Start(ctx context.Context) error {
-	return r.StartOnce("ValidationService", func() error { return nil })
-}
-
-func (r *reportingPluginValidationService) Close() error {
-	return r.StopOnce("ValidationService", func() error { return nil })
-}
-
-func (r *reportingPluginValidationService) HealthReport() map[string]error {
-	return map[string]error{r.Name(): r.Healthy()}
 }

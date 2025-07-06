@@ -5,18 +5,20 @@ import (
 	mrand "math/rand"
 	"testing"
 
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/solidity_vrf_v08_verifier_wrapper"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
+
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/solidity_vrf_v08_verifier_wrapper"
 	proof2 "github.com/smartcontractkit/chainlink/v2/core/services/vrf/proof"
 
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 
-	"github.com/ethereum/go-ethereum/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/utils"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
+
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/vrfkey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/signatures/secp256k1"
@@ -25,12 +27,11 @@ import (
 // Note these tests are identical to the ones in vrf_solidity_crosscheck_test.go,
 // (with the exception of TestVRFV08_InvalidPointCoordinates which is a new check in v0.8)
 // except we are testing against the v0.8 implementation of VRF.sol.
-func deployVRFV08TestHelper(t *testing.T) *solidity_vrf_v08_verifier_wrapper.VRFV08TestHelper {
+func deployVRFV08TestHelper(t *testing.T) *solidity_vrf_v08_verifier_wrapper.VRFTestHelper {
 	auth := testutils.MustNewSimTransactor(t)
-	genesisData := core.GenesisAlloc{auth.From: {Balance: assets.Ether(100).ToInt()}}
-	gasLimit := uint32(ethconfig.Defaults.Miner.GasCeil)
-	backend := cltest.NewSimulatedBackend(t, genesisData, gasLimit)
-	_, _, verifier, err := solidity_vrf_v08_verifier_wrapper.DeployVRFV08TestHelper(auth, backend)
+	genesisData := gethtypes.GenesisAlloc{auth.From: {Balance: assets.Ether(100).ToInt()}}
+	backend := cltest.NewSimulatedBackend(t, genesisData, ethconfig.Defaults.Miner.GasCeil)
+	_, _, verifier, err := solidity_vrf_v08_verifier_wrapper.DeployVRFTestHelper(auth, backend.Client())
 	require.NoError(t, err, "failed to deploy VRF contract to simulated blockchain")
 	backend.Commit()
 	return verifier
@@ -42,11 +43,11 @@ func TestVRFV08_InvalidPointCoordinates(t *testing.T) {
 	_, err := verifier.IsOnCurve(nil,
 		[2]*big.Int{big.NewInt(10), secp256k1.FieldSize})
 	require.Error(t, err)
-	assert.Equal(t, err.Error(), "execution reverted: invalid y-ordinate")
+	assert.Equal(t, "execution reverted: invalid y-ordinate", err.Error())
 	_, err = verifier.IsOnCurve(nil,
 		[2]*big.Int{secp256k1.FieldSize, big.NewInt(10)})
 	require.Error(t, err)
-	assert.Equal(t, err.Error(), "execution reverted: invalid x-ordinate")
+	assert.Equal(t, "execution reverted: invalid x-ordinate", err.Error())
 	// Values inside should succeed
 	_, err = verifier.IsOnCurve(nil,
 		[2]*big.Int{big.NewInt(10), big.NewInt(0).Sub(secp256k1.FieldSize, big.NewInt(1))})
@@ -138,23 +139,6 @@ func TestVRFV08_CompareFieldHash(t *testing.T) {
 	}
 }
 
-// randomKey deterministically generates a secp256k1 key.
-//
-// Never use this if cryptographic security is required
-//func randomKey(t *testing.T, r *mrand.Rand) *ecdsa.PrivateKey {
-//	secretKey := vrfkey.FieldSize
-//	for secretKey.Cmp(vrfkey.FieldSize) >= 0 { // Keep picking until secretKey < fieldSize
-//		secretKey = randomUint256(t, r)
-//	}
-//	cKey := crypto.ToECDSAUnsafe(secretKey.Bytes())
-//	return cKey
-//}
-//
-// pair returns the inputs as a length-2 big.Int array. Useful for translating
-// coordinates to the uint256[2]'s VRF.sol uses to represent secp256k1 points.
-//func pair(x, y *big.Int) [2]*big.Int   { return [2]*big.Int{x, y} }
-//func asPair(p kyber.Point) [2]*big.Int { return pair(secp256k1.Coordinates(p)) }
-
 func TestVRFV08_CompareHashToCurve(t *testing.T) {
 	t.Parallel()
 	r := mrand.New(mrand.NewSource(4))
@@ -171,40 +155,6 @@ func TestVRFV08_CompareHashToCurve(t *testing.T) {
 			"on-chain and off-chain calculations of HashToCurve gave different secp256k1 points")
 	}
 }
-
-// randomPoint deterministically simulates a uniform sample of secp256k1 points,
-// given r's seed
-//
-// Never use this if cryptographic security is required
-//func randomPoint(t *testing.T, r *mrand.Rand) kyber.Point {
-//	p, err := vrfkey.HashToCurve(vrfkey.Generator, randomUint256(t, r), func(*big.Int) {})
-//	require.NoError(t, err,
-//		"failed to hash random value to secp256k1 while generating random point")
-//	if r.Int63n(2) == 1 { // Uniform sample of ±p
-//		p.Neg(p)
-//	}
-//	return p
-//}
-//
-//// randomPointWithPair returns a random secp256k1, both as a kyber.Point and as
-//// a pair of *big.Int's. Useful for translating between the types needed by the
-//// golang contract wrappers.
-//func randomPointWithPair(t *testing.T, r *mrand.Rand) (kyber.Point, [2]*big.Int) {
-//	p := randomPoint(t, r)
-//	return p, asPair(p)
-//}
-
-// randomScalar deterministically simulates a uniform sample of secp256k1
-// scalars, given r's seed
-//
-// Never use this if cryptographic security is required
-//func randomScalar(t *testing.T, r *mrand.Rand) kyber.Scalar {
-//	s := randomUint256(t, r)
-//	for s.Cmp(secp256k1.GroupOrder) >= 0 {
-//		s = randomUint256(t, r)
-//	}
-//	return secp256k1.IntToScalar(s)
-//}
 
 func TestVRFV08_CheckSolidityPointAddition(t *testing.T) {
 	t.Parallel()
@@ -371,7 +321,7 @@ func TestVRFV08_MarshalProof(t *testing.T) {
 			ZInv:          solProof.ZInv,
 		}, randomSeed)
 		require.NoError(t, err, "failed on-chain to verify VRF proof / get its output")
-		require.True(t, response.Cmp(proof.Output) == 0,
+		require.Equal(t, response.Cmp(proof.Output), 0,
 			"on-chain VRF output differs from off-chain!")
 	}
 }

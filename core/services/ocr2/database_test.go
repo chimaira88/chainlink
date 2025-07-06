@@ -5,15 +5,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	medianconfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/median/config"
-
+	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jmoiron/sqlx"
 	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
+	medianconfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/median/config"
+
+	"github.com/smartcontractkit/chainlink-evm/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/pgtest"
@@ -34,16 +34,21 @@ func MustInsertOCROracleSpec(t *testing.T, db *sqlx.DB, transmitterAddress types
 	ds1_multiply [type=multiply times=1.23];
 	ds1 -> ds1_parse -> ds1_multiply -> answer1;
 	answer1      [type=median index=0];`
-	config := medianconfig.PluginConfig{JuelsPerFeeCoinPipeline: mockJuelsPerFeeCoinSource}
+	mockGasPriceSubunitsSource := `ds1          [type=bridge name=voter_turnout];
+	ds1_parse    [type=jsonparse path="one,two"];
+	ds1_multiply [type=multiply times=1.23];
+	ds1 -> ds1_parse -> ds1_multiply -> answer1;
+	answer1      [type=median index=0];`
+	config := medianconfig.PluginConfig{JuelsPerFeeCoinPipeline: mockJuelsPerFeeCoinSource, GasPriceSubunitsPipeline: mockGasPriceSubunitsSource}
 	jsonConfig, err := json.Marshal(config)
 	require.NoError(t, err)
 
 	require.NoError(t, db.Get(&spec, `INSERT INTO ocr2_oracle_specs (
 relay, relay_config, contract_id, p2pv2_bootstrappers, ocr_key_bundle_id, monitoring_endpoint, transmitter_id, 
-blockchain_timeout, contract_config_tracker_poll_interval, contract_config_confirmations, plugin_type, plugin_config, onchain_signing_strategy, created_at, updated_at) VALUES (
+blockchain_timeout, contract_config_tracker_poll_interval, contract_config_confirmations, plugin_type, plugin_config, onchain_signing_strategy, allow_no_bootstrappers, created_at, updated_at) VALUES (
 'ethereum', '{}', $1, '{}', $2, $3, $4,
-0, 0, 0, 'median', $5, '{}', NOW(), NOW()
-) RETURNING *`, cltest.NewEIP55Address().String(), cltest.DefaultOCR2KeyBundleID, "chain.link:1234", transmitterAddress.String(), jsonConfig))
+0, 0, 0, 'median', $5, '{}', $6, NOW(), NOW()
+) RETURNING *`, cltest.NewEIP55Address().String(), cltest.DefaultOCR2KeyBundleID, "chain.link:1234", transmitterAddress.String(), jsonConfig, true))
 	return spec
 }
 
@@ -339,7 +344,7 @@ func Test_DB_PendingTransmissions(t *testing.T) {
 		// No keys for this oracleSpecID yet
 		m, err = db2.PendingTransmissionsWithConfigDigest(testutils.Context(t), configDigest)
 		require.NoError(t, err)
-		require.Len(t, m, 0)
+		require.Empty(t, m)
 	})
 
 	t.Run("deletes pending transmission by key", func(t *testing.T) {

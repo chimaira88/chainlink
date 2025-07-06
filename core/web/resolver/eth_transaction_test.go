@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"math/big"
@@ -13,14 +14,15 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/loop"
 	"github.com/smartcontractkit/chainlink-common/pkg/types"
-	txmgrcommon "github.com/smartcontractkit/chainlink/v2/common/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/config/toml"
+	"github.com/smartcontractkit/chainlink-evm/pkg/gas"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
+	ubig "github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
+	txmgrcommon "github.com/smartcontractkit/chainlink-framework/chains/txmgr"
 	chainlinkmocks "github.com/smartcontractkit/chainlink/v2/core/services/chainlink/mocks"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay"
 	"github.com/smartcontractkit/chainlink/v2/core/web/testutils"
 )
 
@@ -68,7 +70,7 @@ func TestResolver_EthTransaction(t *testing.T) {
 		{
 			name:          "success",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				f.Mocks.txmStore.On("FindTxByHash", mock.Anything, hash).Return(&txmgr.Tx{
 					ID:             1,
 					ToAddress:      common.HexToAddress("0x5431F5F973781809D18643b87B44921b11355d81"),
@@ -84,7 +86,7 @@ func TestResolver_EthTransaction(t *testing.T) {
 					{
 						TxID:                    1,
 						Hash:                    hash,
-						TxFee:                   gas.EvmFee{Legacy: assets.NewWeiI(12)},
+						TxFee:                   gas.EvmFee{GasPrice: assets.NewWeiI(12)},
 						SignedRawTx:             []byte("something"),
 						BroadcastBeforeBlockNum: nil,
 					},
@@ -92,8 +94,11 @@ func TestResolver_EthTransaction(t *testing.T) {
 				f.App.On("TxmStorageService").Return(f.Mocks.txmStore)
 				f.Mocks.evmORM.PutChains(toml.EVMConfig{ChainID: &chainID})
 				f.App.On("GetRelayers").Return(&chainlinkmocks.FakeRelayerChainInteroperators{
-					Relayers: []loop.Relayer{
-						testutils.MockRelayer{ChainStatus: types.ChainStatus{
+					Relayers: map[types.RelayID]loop.Relayer{
+						types.RelayID{
+							Network: relay.NetworkEVM,
+							ChainID: "22",
+						}: testutils.MockRelayer{ChainStatus: types.ChainStatus{
 							ID:      "22",
 							Enabled: true,
 							Config:  "",
@@ -130,7 +135,7 @@ func TestResolver_EthTransaction(t *testing.T) {
 		{
 			name:          "success without nil values",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				num := int64(2)
 				nonce := evmtypes.Nonce(num)
 
@@ -149,7 +154,7 @@ func TestResolver_EthTransaction(t *testing.T) {
 					{
 						TxID:                    1,
 						Hash:                    hash,
-						TxFee:                   gas.EvmFee{Legacy: assets.NewWeiI(12)},
+						TxFee:                   gas.EvmFee{GasPrice: assets.NewWeiI(12)},
 						SignedRawTx:             []byte("something"),
 						BroadcastBeforeBlockNum: &num,
 					},
@@ -157,8 +162,11 @@ func TestResolver_EthTransaction(t *testing.T) {
 				f.App.On("TxmStorageService").Return(f.Mocks.txmStore)
 				f.Mocks.evmORM.PutChains(toml.EVMConfig{ChainID: &chainID})
 				f.App.On("GetRelayers").Return(&chainlinkmocks.FakeRelayerChainInteroperators{
-					Relayers: []loop.Relayer{
-						testutils.MockRelayer{ChainStatus: types.ChainStatus{
+					Relayers: map[types.RelayID]loop.Relayer{
+						types.RelayID{
+							Network: relay.NetworkEVM,
+							ChainID: "22",
+						}: testutils.MockRelayer{ChainStatus: types.ChainStatus{
 							ID:      "22",
 							Enabled: true,
 							Config:  "",
@@ -195,7 +203,7 @@ func TestResolver_EthTransaction(t *testing.T) {
 		{
 			name:          "not found error",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				f.Mocks.txmStore.On("FindTxByHash", mock.Anything, hash).Return(nil, sql.ErrNoRows)
 				f.App.On("TxmStorageService").Return(f.Mocks.txmStore)
 			},
@@ -212,7 +220,7 @@ func TestResolver_EthTransaction(t *testing.T) {
 		{
 			name:          "generic error",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				f.Mocks.txmStore.On("FindTxByHash", mock.Anything, hash).Return(nil, gError)
 				f.App.On("TxmStorageService").Return(f.Mocks.txmStore)
 			},
@@ -266,7 +274,7 @@ func TestResolver_EthTransactions(t *testing.T) {
 		{
 			name:          "success",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				num := int64(2)
 
 				f.Mocks.txmStore.On("Transactions", mock.Anything, PageDefaultOffset, PageDefaultLimit).Return([]txmgr.Tx{
@@ -285,7 +293,7 @@ func TestResolver_EthTransactions(t *testing.T) {
 					{
 						TxID:                    1,
 						Hash:                    hash,
-						TxFee:                   gas.EvmFee{Legacy: assets.NewWeiI(12)},
+						TxFee:                   gas.EvmFee{GasPrice: assets.NewWeiI(12)},
 						SignedRawTx:             []byte("something"),
 						BroadcastBeforeBlockNum: &num,
 					},
@@ -319,7 +327,7 @@ func TestResolver_EthTransactions(t *testing.T) {
 		{
 			name:          "generic error",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				f.Mocks.txmStore.On("Transactions", mock.Anything, PageDefaultOffset, PageDefaultLimit).Return(nil, 0, gError)
 				f.App.On("TxmStorageService").Return(f.Mocks.txmStore)
 			},
@@ -364,13 +372,13 @@ func TestResolver_EthTransactionsAttempts(t *testing.T) {
 		{
 			name:          "success",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				num := int64(2)
 
 				f.Mocks.txmStore.On("TxAttempts", mock.Anything, PageDefaultOffset, PageDefaultLimit).Return([]txmgr.TxAttempt{
 					{
 						Hash:                    hash,
-						TxFee:                   gas.EvmFee{Legacy: assets.NewWeiI(12)},
+						TxFee:                   gas.EvmFee{GasPrice: assets.NewWeiI(12)},
 						SignedRawTx:             []byte("something"),
 						BroadcastBeforeBlockNum: &num,
 						Tx:                      txmgr.Tx{},
@@ -397,11 +405,11 @@ func TestResolver_EthTransactionsAttempts(t *testing.T) {
 		{
 			name:          "success with nil values",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				f.Mocks.txmStore.On("TxAttempts", mock.Anything, PageDefaultOffset, PageDefaultLimit).Return([]txmgr.TxAttempt{
 					{
 						Hash:                    hash,
-						TxFee:                   gas.EvmFee{Legacy: assets.NewWeiI(12)},
+						TxFee:                   gas.EvmFee{GasPrice: assets.NewWeiI(12)},
 						SignedRawTx:             []byte("something"),
 						BroadcastBeforeBlockNum: nil,
 					},
@@ -427,7 +435,7 @@ func TestResolver_EthTransactionsAttempts(t *testing.T) {
 		{
 			name:          "generic error",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				f.Mocks.txmStore.On("TxAttempts", mock.Anything, PageDefaultOffset, PageDefaultLimit).Return(nil, 0, gError)
 				f.App.On("TxmStorageService").Return(f.Mocks.txmStore)
 			},

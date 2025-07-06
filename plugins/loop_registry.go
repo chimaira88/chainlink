@@ -6,8 +6,9 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/hashicorp/consul/sdk/freeport"
+	"github.com/smartcontractkit/freeport"
 
+	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/loop"
 
@@ -27,15 +28,36 @@ type LoopRegistry struct {
 	mu       sync.Mutex
 	registry map[string]*RegisteredLoop
 
-	lggr       logger.Logger
-	cfgTracing config.Tracing
+	lggr                   logger.Logger
+	appID                  string
+	featureLogPoller       bool
+	cfgDatabase            config.Database
+	cfgMercury             config.Mercury
+	cfgTracing             config.Tracing
+	cfgTelemetry           config.Telemetry
+	telemetryAuthHeaders   map[string]string
+	telemetryAuthPubKeyHex string
 }
 
-func NewLoopRegistry(lggr logger.Logger, tracingConfig config.Tracing) *LoopRegistry {
+func NewLoopRegistry(lggr logger.Logger, appID string, featureLogPoller bool, dbConfig config.Database, mercury config.Mercury, tracing config.Tracing, telemetry config.Telemetry, telemetryAuthHeaders map[string]string, telemetryAuthPubKeyHex string) *LoopRegistry {
 	return &LoopRegistry{
-		registry:   map[string]*RegisteredLoop{},
-		lggr:       logger.Named(lggr, "LoopRegistry"),
-		cfgTracing: tracingConfig,
+		registry:               map[string]*RegisteredLoop{},
+		lggr:                   logger.Named(lggr, "LoopRegistry"),
+		appID:                  appID,
+		featureLogPoller:       featureLogPoller,
+		cfgDatabase:            dbConfig,
+		cfgMercury:             mercury,
+		cfgTracing:             tracing,
+		cfgTelemetry:           telemetry,
+		telemetryAuthHeaders:   telemetryAuthHeaders,
+		telemetryAuthPubKeyHex: telemetryAuthPubKeyHex,
+	}
+}
+
+func NewTestLoopRegistry(lggr logger.Logger) *LoopRegistry {
+	return &LoopRegistry{
+		registry: map[string]*RegisteredLoop{},
+		lggr:     logger.Named(lggr, "LoopRegistry"),
 	}
 }
 
@@ -50,12 +72,41 @@ func (m *LoopRegistry) Register(id string) (*RegisteredLoop, error) {
 	}
 	ports, err := freeport.Take(1)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get free port: %v", err)
+		return nil, fmt.Errorf("failed to get free port: %w", err)
 	}
 	if len(ports) != 1 {
-		return nil, fmt.Errorf("failed to get free port: no ports returned")
+		return nil, errors.New("failed to get free port: no ports returned")
 	}
-	envCfg := loop.EnvConfig{PrometheusPort: ports[0]}
+	envCfg := loop.EnvConfig{
+		AppID:            m.appID,
+		FeatureLogPoller: m.featureLogPoller,
+		PrometheusPort:   ports[0],
+	}
+
+	if m.cfgDatabase != nil {
+		dbURL := m.cfgDatabase.URL()
+		envCfg.DatabaseURL = (*commonconfig.SecretURL)(&dbURL)
+		envCfg.DatabaseIdleInTxSessionTimeout = m.cfgDatabase.DefaultIdleInTxSessionTimeout()
+		envCfg.DatabaseLockTimeout = m.cfgDatabase.DefaultLockTimeout()
+		envCfg.DatabaseQueryTimeout = m.cfgDatabase.DefaultQueryTimeout()
+		envCfg.DatabaseListenerFallbackPollInterval = m.cfgDatabase.Listener().FallbackPollInterval()
+		envCfg.DatabaseLogSQL = m.cfgDatabase.LogSQL()
+		envCfg.DatabaseMaxOpenConns = m.cfgDatabase.MaxOpenConns()
+		envCfg.DatabaseMaxIdleConns = m.cfgDatabase.MaxIdleConns()
+	}
+
+	if m.cfgMercury != nil {
+		envCfg.MercuryCacheLatestReportDeadline = m.cfgMercury.Cache().LatestReportDeadline()
+		envCfg.MercuryCacheLatestReportTTL = m.cfgMercury.Cache().LatestReportTTL()
+		envCfg.MercuryCacheMaxStaleAge = m.cfgMercury.Cache().MaxStaleAge()
+		envCfg.MercuryTransmitterProtocol = string(m.cfgMercury.Transmitter().Protocol())
+		envCfg.MercuryTransmitterTransmitQueueMaxSize = m.cfgMercury.Transmitter().TransmitQueueMaxSize()
+		envCfg.MercuryTransmitterTransmitTimeout = m.cfgMercury.Transmitter().TransmitTimeout()
+		envCfg.MercuryTransmitterTransmitConcurrency = m.cfgMercury.Transmitter().TransmitConcurrency()
+		envCfg.MercuryTransmitterReaperFrequency = m.cfgMercury.Transmitter().ReaperFrequency()
+		envCfg.MercuryTransmitterReaperMaxAge = m.cfgMercury.Transmitter().ReaperMaxAge()
+		envCfg.MercuryVerboseLogging = m.cfgMercury.VerboseLogging()
+	}
 
 	if m.cfgTracing != nil {
 		envCfg.TracingEnabled = m.cfgTracing.Enabled()
@@ -65,8 +116,26 @@ func (m *LoopRegistry) Register(id string) (*RegisteredLoop, error) {
 		envCfg.TracingAttributes = m.cfgTracing.Attributes()
 	}
 
+	if m.cfgTelemetry != nil {
+		envCfg.TelemetryEnabled = m.cfgTelemetry.Enabled()
+		envCfg.TelemetryEndpoint = m.cfgTelemetry.OtelExporterGRPCEndpoint()
+		envCfg.TelemetryInsecureConnection = m.cfgTelemetry.InsecureConnection()
+		envCfg.TelemetryCACertFile = m.cfgTelemetry.CACertFile()
+		envCfg.TelemetryAttributes = m.cfgTelemetry.ResourceAttributes()
+		envCfg.TelemetryTraceSampleRatio = m.cfgTelemetry.TraceSampleRatio()
+		envCfg.TelemetryEmitterBatchProcessor = m.cfgTelemetry.EmitterBatchProcessor()
+		envCfg.TelemetryEmitterExportTimeout = m.cfgTelemetry.EmitterExportTimeout()
+		envCfg.TelemetryAuthPubKeyHex = m.telemetryAuthPubKeyHex
+		envCfg.ChipIngressEndpoint = m.cfgTelemetry.ChipIngressEndpoint()
+	}
+	m.lggr.Debugf("Registered loopp %q with port %d", id, envCfg.PrometheusPort)
+
+	// Add auth header after logging config
+	if m.cfgTelemetry != nil {
+		envCfg.TelemetryAuthHeaders = m.telemetryAuthHeaders
+	}
+
 	m.registry[id] = &RegisteredLoop{Name: id, EnvCfg: envCfg}
-	m.lggr.Debugf("Registered loopp %q with config %v, port %d", id, envCfg, envCfg.PrometheusPort)
 	return m.registry[id], nil
 }
 

@@ -3,7 +3,6 @@ package migrations
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log"
 	"math/big"
 	"os"
@@ -11,10 +10,6 @@ import (
 
 	"github.com/pressly/goose/v3"
 )
-
-func init() {
-	goose.AddMigrationContext(Up56, Down56)
-}
 
 const up56 = `
 CREATE TABLE evm_chains (
@@ -48,7 +43,6 @@ DROP TABLE nodes;
 DROP TABLE evm_chains;
 `
 
-// nolint
 func Up56(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, up56); err != nil {
 		return err
@@ -66,7 +60,7 @@ func Up56(ctx context.Context, tx *sql.Tx) error {
 			}
 			chainID, ok := new(big.Int).SetString(chainIDStr, 10)
 			if !ok {
-				panic(fmt.Sprintf("ETH_CHAIN_ID was invalid, expected a number, got: %s", chainIDStr))
+				panic("ETH_CHAIN_ID was invalid, expected a number, got: " + chainIDStr)
 			}
 			_, err := tx.ExecContext(ctx, "INSERT INTO evm_chains (id, created_at, updated_at) VALUES ($1, NOW(), NOW());", chainID.String())
 			return err
@@ -75,7 +69,6 @@ func Up56(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// nolint
 func Down56(ctx context.Context, tx *sql.Tx) error {
 	_, err := tx.ExecContext(ctx, down56)
 	if err != nil {
@@ -83,3 +76,5 @@ func Down56(ctx context.Context, tx *sql.Tx) error {
 	}
 	return nil
 }
+
+var Migration56 = goose.NewGoMigration(56, &goose.GoFunc{RunTx: Up56}, &goose.GoFunc{RunTx: Down56})

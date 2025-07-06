@@ -1,17 +1,23 @@
 package testspecs
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf/vrfcommon"
 	"github.com/smartcontractkit/chainlink/v2/core/services/webhook"
+	"github.com/smartcontractkit/chainlink/v2/core/services/workflows"
 )
 
 var (
@@ -19,7 +25,7 @@ var (
 type                = "cron"
 schemaVersion       = 1
 schedule            = "CRON_TZ=UTC * 0 0 1 1 *"
-externalJobID       =  "%s"
+externalJobID       = "%s"
 observationSource   = """
 ds          [type=http method=GET url="https://chain.link/ETH-USD"];
 ds_parse    [type=jsonparse path="data,price"];
@@ -31,7 +37,20 @@ ds -> ds_parse -> ds_multiply;
 type                = "cron"
 schemaVersion       = 1
 schedule            = "CRON_TZ=UTC * 0 0 1 1 *"
-externalJobID       =  "%s"
+externalJobID       = "%s"
+observationSource   = """
+ds          [type=http method=GET url="https://chain.link/ETH-USD"];
+ds_parse    [type=jsonparse path="data.price" separator="."];
+ds_multiply [type=multiply times=100];
+ds -> ds_parse -> ds_multiply;
+"""
+`
+	CronSpecEVMChainIDTemplate = `
+type                = "cron"
+schemaVersion       = 1
+schedule            = "CRON_TZ=UTC * 0 0 1 1 *"
+externalJobID       = "%s"
+evmChainID          = "42"
 observationSource   = """
 ds          [type=http method=GET url="https://chain.link/ETH-USD"];
 ds_parse    [type=jsonparse path="data.price" separator="."];
@@ -57,7 +76,7 @@ type                = "directrequest"
 schemaVersion       = 1
 name                = "%s"
 contractAddress     = "0x613a38AC1659769640aaE063C651F48E0250454C"
-externalJobID       =  "%s"
+externalJobID       = "%s"
 evmChainID 			= "0"
 observationSource   = """
     ds1          [type=http method=GET url="http://example.com" allowunrestrictednetworkaccess="true"];
@@ -168,7 +187,81 @@ contractID		= "0x613a38AC1659769640aaE063C651F48E0250454C"
 [relayConfig]
 chainID			= 1337
 `
+
+	GatewaySpec = `
+type = "gateway"
+schemaVersion = 1
+externalJobID = "%s"
+name = "Gateway"
+forwardingAllowed = false
+[gatewayConfig.ConnectionManagerConfig]
+AuthChallengeLen = 10
+AuthGatewayId = "%s"
+AuthTimestampToleranceSec = 5
+HeartbeatIntervalSec = 20
+[[gatewayConfig.Dons]]
+DonId = "1"
+F = 1
+HandlerName = "web-api-capabilities"
+	[gatewayConfig.Dons.HandlerConfig]
+	MaxAllowedMessageAgeSec = 1_000
+		[gatewayConfig.Dons.HandlerConfig.NodeRateLimiter]
+		GlobalBurst = 10
+		GlobalRPS = 50
+		PerSenderBurst = 10
+		PerSenderRPS = 10
+	[[gatewayConfig.Dons.Members]]
+	Address = "%s"
+	Name = "Workflow Node 1"
+	[[gatewayConfig.Dons.Members]]
+	Address = "%s"
+	Name = "Workflow Node 2"
+	[[gatewayConfig.Dons.Members]]
+	Address = "%s"
+	Name = "Workflow Node 3"
+	[[gatewayConfig.Dons.Members]]
+	Address = "%s"
+	Name = "Workflow Node 4"
+[gatewayConfig.NodeServerConfig]
+HandshakeTimeoutMillis = 1_000
+MaxRequestBytes = 100_000
+Path = "%s"
+Port = %d
+ReadTimeoutMillis = 1_000
+RequestTimeoutMillis = 10_000
+WriteTimeoutMillis = 1_000
+[gatewayConfig.UserServerConfig]
+ContentTypeHeader = "application/jsonrpc"
+MaxRequestBytes = 100_000
+Path = "%s"
+Port = %d
+ReadTimeoutMillis = 1_000
+RequestTimeoutMillis = 10_000
+WriteTimeoutMillis = 1_000
+CORSEnabled = false
+CORSAllowedOrigins = []
+[gatewayConfig.HTTPClientConfig]
+MaxResponseBytes = 100_000_000
+`
+
+	StandardCapabilitySpec = `
+type = "standardcapabilities"
+schemaVersion = 1
+externalJobID = "%s"
+name = "%s"
+forwardingAllowed = false
+command = "/home/capabilities/%s"
+config = "%s"
+`
 )
+
+func GetStandardCapabilitySpec() string {
+	return fmt.Sprintf(StandardCapabilitySpec, uuid.New(), "some-capability", "some_capability_linux_amd64", "")
+}
+
+func GetGatewaySpec() string {
+	return fmt.Sprintf(GatewaySpec, uuid.New(), "gateway", "0xABA5eDc1a551E55b1A570c0e1f1055e5BE11eca1", "0xABA5eDc1a551E55b1A570c0e1f1055e5BE11eca2", "0xABA5eDc1a551E55b1A570c0e1f1055e5BE11eca3", "0xABA5eDc1a551E55b1A570c0e1f1055e5BE11eca4", "/node", 8080, "/user", 8081)
+}
 
 func GetOCRBootstrapSpec() string {
 	return fmt.Sprintf(OCRBootstrapSpec, uuid.New())
@@ -864,25 +957,96 @@ ds -> ds_parse -> ds_multiply;
 	return StreamSpec{StreamSpecParams: params, toml: toml}
 }
 
-type WorkflowSpec struct {
+// WorkflowJobSpec is a test helper that wraps both the TOML and job.Job representation of a workflow job spec
+type WorkflowJobSpec struct {
 	toml string
+	j    job.Job
 }
 
-func (w WorkflowSpec) Toml() string {
+func (w WorkflowJobSpec) Toml() string {
 	return w.toml
 }
 
-func GenerateWorkflowSpec(id, owner, spec string) WorkflowSpec {
+func (w WorkflowJobSpec) Job() job.Job {
+	return w.j
+}
+
+// GenerateWorkflowJobSpec creates a WorkflowJobSpec from the given workflow yaml spec string
+func GenerateWorkflowJobSpec(t *testing.T, spec string) WorkflowJobSpec {
+	t.Helper()
+	sum := sha256.Sum256([]byte(spec))
+	id := fmt.Sprintf("%x", sum)
 	template := `
 type = "workflow"
 schemaVersion = 1
 name = "test-spec"
 workflowId = "%s"
-workflowOwner = "%s"
 workflow = """
 %s
 """
 `
-	toml := fmt.Sprintf(template, id, owner, spec)
-	return WorkflowSpec{toml: toml}
+
+	toml := fmt.Sprintf(template, id, spec)
+	j, err := workflows.ValidatedWorkflowJobSpec(testutils.Context(t), toml)
+	require.NoError(t, err, "failed to validate TOML job spec for workflow %s", toml)
+	return WorkflowJobSpec{toml: toml, j: j}
 }
+
+func DefaultWorkflowJobSpec(t *testing.T) WorkflowJobSpec {
+	return GenerateWorkflowJobSpec(t, defaultWFYamlSpec)
+}
+
+var defaultWFYamlSpec = `
+name: "myworkflow"
+owner: "0x00000000000000000000000000000000000000aa"
+triggers:
+  - id: "a-trigger@1.0.0"
+    config: {}
+
+actions:
+  - id: "an-action@1.0.0"
+    ref: "an-action"
+    config: {}
+    inputs:
+      trigger_output: $(trigger.outputs)
+
+consensus:
+  - id: "a-consensus@1.0.0"
+    ref: "a-consensus"
+    config: {}
+    inputs:
+      trigger_output: $(trigger.outputs)
+      an-action_output: $(an-action.outputs)
+
+targets:
+  - id: "a-target@1.0.0"
+    config: {}
+    ref: "a-target"
+    inputs:
+      consensus_output: $(a-consensus.outputs)
+`
+var OCR2EVMDualTransmissionSpecMinimalTemplate = `
+type = "offchainreporting2"
+schemaVersion = 1
+name = "test-job"
+relay = "evm"
+contractID = "0x613a38AC1659769640aaE063C651F48E0250454C"
+p2pv2Bootstrappers = []
+transmitterID = "%s"
+pluginType         = "median"
+observationSource = """
+	ds          [type=http method=GET url="https://chain.link/ETH-USD"];
+	ds_parse    [type=jsonparse path="data.price" separator="."];
+	ds_multiply [type=multiply times=100];
+	ds -> ds_parse -> ds_multiply;
+"""
+[pluginConfig]
+juelsPerFeeCoinSource = """
+	ds          [type=http method=GET url="https://chain.link/ETH-USD"];
+	ds_parse    [type=jsonparse path="data.price" separator="."];
+	ds_multiply [type=multiply times=100];
+	ds -> ds_parse -> ds_multiply;
+"""
+[relayConfig]
+chainID = 0
+`

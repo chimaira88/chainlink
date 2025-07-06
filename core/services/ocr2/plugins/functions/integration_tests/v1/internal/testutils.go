@@ -15,41 +15,45 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind/backends"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
-	"github.com/hashicorp/consul/sdk/freeport"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smartcontractkit/freeport"
 
 	"github.com/smartcontractkit/libocr/commontypes"
 	confighelper2 "github.com/smartcontractkit/libocr/offchainreporting2plus/confighelper"
 	ocrtypes2 "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
 	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
+
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/functions/generated/functions_allow_list"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/functions/generated/functions_client_example"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/functions/generated/functions_coordinator"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/functions/generated/functions_router"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/link_token_interface"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/mock_v3_aggregator_contract"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/client"
+	evmtestutils "github.com/smartcontractkit/chainlink-evm/pkg/testutils"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/functions/generated/functions_allow_list"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/functions/generated/functions_client_example"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/functions/generated/functions_coordinator"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/functions/generated/functions_router"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/link_token_interface"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/mock_v3_aggregator_contract"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest/heavyweight"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/functions"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
-	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/keystest"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ocr2key"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/p2pkey"
 	functionsConfig "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/functions/config"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/validate"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocrbootstrap"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
+	"github.com/smartcontractkit/chainlink/v2/core/utils/testutils/heavyweight"
 )
 
 var nilOpts *bind.CallOpts
@@ -58,7 +62,7 @@ func ptr[T any](v T) *T { return &v }
 
 var allowListPrivateKey = "0xae78c8b502571dba876742437f8bc78b689cf8518356c0921393d89caaf284ce"
 
-func SetOracleConfig(t *testing.T, b *backends.SimulatedBackend, owner *bind.TransactOpts, coordinatorContract *functions_coordinator.FunctionsCoordinator, oracles []confighelper2.OracleIdentityExtra, batchSize int, functionsPluginConfig *functionsConfig.ReportingPluginConfig) {
+func SetOracleConfig(t *testing.T, b evmtypes.Backend, owner *bind.TransactOpts, coordinatorContract *functions_coordinator.FunctionsCoordinator, oracles []confighelper2.OracleIdentityExtra, batchSize int, functionsPluginConfig *functionsConfig.ReportingPluginConfig) {
 	S := make([]int, len(oracles))
 	for i := 0; i < len(S); i++ {
 		S[i] = 1
@@ -79,6 +83,7 @@ func SetOracleConfig(t *testing.T, b *backends.SimulatedBackend, owner *bind.Tra
 		S,                    // S (schedule of randomized transmission order)
 		oracles,
 		reportingPluginConfigBytes,
+		nil,
 		200*time.Millisecond, // maxDurationQuery
 		200*time.Millisecond, // maxDurationObservation
 		200*time.Millisecond, // maxDurationReport
@@ -106,10 +111,10 @@ func SetOracleConfig(t *testing.T, b *backends.SimulatedBackend, owner *bind.Tra
 		offchainConfig,
 	)
 	require.NoError(t, err)
-	CommitWithFinality(b)
+	client.FinalizeLatest(t, b)
 }
 
-func CreateAndFundSubscriptions(t *testing.T, b *backends.SimulatedBackend, owner *bind.TransactOpts, linkToken *link_token_interface.LinkToken, routerContractAddress common.Address, routerContract *functions_router.FunctionsRouter, clientContracts []deployedClientContract, allowListContract *functions_allow_list.TermsOfServiceAllowList) (subscriptionId uint64) {
+func CreateAndFundSubscriptions(t *testing.T, b evmtypes.Backend, owner *bind.TransactOpts, linkToken *link_token_interface.LinkToken, routerContractAddress common.Address, routerContract *functions_router.FunctionsRouter, clientContracts []deployedClientContract, allowListContract *functions_allow_list.TermsOfServiceAllowList) (subscriptionID uint64) {
 	allowed, err := allowListContract.HasAccess(nilOpts, owner.From, []byte{})
 	require.NoError(t, err)
 	if !allowed {
@@ -126,17 +131,20 @@ func CreateAndFundSubscriptions(t *testing.T, b *backends.SimulatedBackend, owne
 		v := flatSignature[65]
 		_, err2 = allowListContract.AcceptTermsOfService(owner, owner.From, owner.From, r, s, v)
 		require.NoError(t, err2)
+		b.Commit()
 	}
 
 	_, err = routerContract.CreateSubscription(owner)
 	require.NoError(t, err)
+	b.Commit()
 
-	subscriptionID := uint64(1)
+	subscriptionID = uint64(1)
 
 	numContracts := len(clientContracts)
 	for i := 0; i < numContracts; i++ {
 		_, err = routerContract.AddConsumer(owner, subscriptionID, clientContracts[i].Address)
 		require.NoError(t, err)
+		b.Commit()
 	}
 
 	data, err := utils.ABIEncode(`[{"type":"uint64"}]`, subscriptionID)
@@ -147,15 +155,7 @@ func CreateAndFundSubscriptions(t *testing.T, b *backends.SimulatedBackend, owne
 	require.NoError(t, err)
 	b.Commit()
 
-	return subscriptionID
-}
-
-const finalityDepth int = 4
-
-func CommitWithFinality(b *backends.SimulatedBackend) {
-	for i := 0; i < finalityDepth; i++ {
-		b.Commit()
-	}
+	return
 }
 
 type deployedClientContract struct {
@@ -168,27 +168,29 @@ type Coordinator struct {
 	Contract *functions_coordinator.FunctionsCoordinator
 }
 
-func StartNewChainWithContracts(t *testing.T, nClients int) (*bind.TransactOpts, *backends.SimulatedBackend, *time.Ticker, Coordinator, Coordinator, []deployedClientContract, common.Address, *functions_router.FunctionsRouter, *link_token_interface.LinkToken, common.Address, *functions_allow_list.TermsOfServiceAllowList) {
-	owner := testutils.MustNewSimTransactor(t)
+func StartNewChainWithContracts(t *testing.T, nClients int) (*bind.TransactOpts, evmtypes.Backend, func() common.Hash, func(), Coordinator, Coordinator, []deployedClientContract, common.Address, *functions_router.FunctionsRouter, *link_token_interface.LinkToken, common.Address, *functions_allow_list.TermsOfServiceAllowList) {
+	owner := evmtestutils.MustNewSimTransactor(t)
 	owner.GasPrice = big.NewInt(int64(DefaultGasPrice))
 	sb := new(big.Int)
 	sb, _ = sb.SetString("100000000000000000000", 10) // 1 eth
-	genesisData := core.GenesisAlloc{owner.From: {Balance: sb}}
-	gasLimit := ethconfig.Defaults.Miner.GasCeil * 2 // 60 M blocks
-	b := backends.NewSimulatedBackend(genesisData, gasLimit)
+	genesisData := types.GenesisAlloc{owner.From: {Balance: sb}}
+	b := cltest.NewSimulatedBackend(t, genesisData, 2*ethconfig.Defaults.Miner.GasCeil)
 	b.Commit()
 
 	// Deploy LINK token
-	linkAddr, _, linkToken, err := link_token_interface.DeployLinkToken(owner, b)
+	linkAddr, _, linkToken, err := link_token_interface.DeployLinkToken(owner, b.Client())
 	require.NoError(t, err)
+	b.Commit()
 
 	// Deploy mock LINK/ETH price feed
-	linkEthFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(owner, b, 18, big.NewInt(5_000_000_000_000_000))
+	linkEthFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(owner, b.Client(), 18, big.NewInt(5_000_000_000_000_000))
 	require.NoError(t, err)
+	b.Commit()
 
 	// Deploy mock LINK/USD price feed
-	linkUsdFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(owner, b, 18, big.NewInt(1_500_00_000))
+	linkUsdFeedAddr, _, _, err := mock_v3_aggregator_contract.DeployMockV3AggregatorContract(owner, b.Client(), 18, big.NewInt(1_500_00_000))
 	require.NoError(t, err)
+	b.Commit()
 
 	// Deploy Router contract
 	handleOracleFulfillmentSelectorSlice, err := hex.DecodeString("0ca76175")
@@ -204,8 +206,9 @@ func StartNewChainWithContracts(t *testing.T, nClients int) (*bind.TransactOpts,
 		SubscriptionDepositMinimumRequests: 10,
 		SubscriptionDepositJuels:           big.NewInt(9 * 1e18), // 9 LINK
 	}
-	routerAddress, _, routerContract, err := functions_router.DeployFunctionsRouter(owner, b, linkAddr, functionsRouterConfig)
+	routerAddress, _, routerContract, err := functions_router.DeployFunctionsRouter(owner, b.Client(), linkAddr, functionsRouterConfig)
 	require.NoError(t, err)
+	b.Commit()
 
 	// Deploy Allow List contract
 	privateKey, err := crypto.HexToECDSA(allowListPrivateKey[2:])
@@ -217,8 +220,11 @@ func StartNewChainWithContracts(t *testing.T, nClients int) (*bind.TransactOpts,
 	}
 	var initialAllowedSenders []common.Address
 	var initialBlockedSenders []common.Address
-	allowListAddress, _, allowListContract, err := functions_allow_list.DeployTermsOfServiceAllowList(owner, b, allowListConfig, initialAllowedSenders, initialBlockedSenders)
+	// The allowlist requires a pointer to the previous allowlist. If none exists, use the null address.
+	var nullPreviousAllowlist common.Address
+	allowListAddress, _, allowListContract, err := functions_allow_list.DeployTermsOfServiceAllowList(owner, b.Client(), allowListConfig, initialAllowedSenders, initialBlockedSenders, nullPreviousAllowlist)
 	require.NoError(t, err)
+	b.Commit()
 
 	// Deploy Coordinator contract (matches updateConfig() in FunctionsBilling.sol)
 	coordinatorConfig := functions_coordinator.FunctionsBillingConfig{
@@ -234,18 +240,22 @@ func StartNewChainWithContracts(t *testing.T, nClients int) (*bind.TransactOpts,
 		OperationFeeCentsUsd:                uint16(0),
 		FallbackUsdPerUnitLink:              uint64(1_400_000_000),
 		FallbackUsdPerUnitLinkDecimals:      uint8(8),
+		TransmitTxSizeBytes:                 uint16(1764),
 	}
 	require.NoError(t, err)
-	coordinatorAddress, _, coordinatorContract, err := functions_coordinator.DeployFunctionsCoordinator(owner, b, routerAddress, coordinatorConfig, linkEthFeedAddr, linkUsdFeedAddr)
+	coordinatorAddress, _, coordinatorContract, err := functions_coordinator.DeployFunctionsCoordinator(owner, b.Client(), routerAddress, coordinatorConfig, linkEthFeedAddr, linkUsdFeedAddr)
 	require.NoError(t, err)
-	proposalAddress, _, proposalContract, err := functions_coordinator.DeployFunctionsCoordinator(owner, b, routerAddress, coordinatorConfig, linkEthFeedAddr, linkUsdFeedAddr)
+	b.Commit()
+	proposalAddress, _, proposalContract, err := functions_coordinator.DeployFunctionsCoordinator(owner, b.Client(), routerAddress, coordinatorConfig, linkEthFeedAddr, linkUsdFeedAddr)
 	require.NoError(t, err)
+	b.Commit()
 
 	// Deploy Client contracts
 	clientContracts := []deployedClientContract{}
 	for i := 0; i < nClients; i++ {
-		clientContractAddress, _, clientContract, err := functions_client_example.DeployFunctionsClientExample(owner, b, routerAddress)
+		clientContractAddress, _, clientContract, err := functions_client_example.DeployFunctionsClientExample(owner, b.Client(), routerAddress)
 		require.NoError(t, err)
+		b.Commit()
 		clientContracts = append(clientContracts, deployedClientContract{
 			Address:  clientContractAddress,
 			Contract: clientContract,
@@ -256,13 +266,8 @@ func StartNewChainWithContracts(t *testing.T, nClients int) (*bind.TransactOpts,
 		}
 	}
 
-	CommitWithFinality(b)
-	ticker := time.NewTicker(1 * time.Second)
-	go func() {
-		for range ticker.C {
-			b.Commit()
-		}
-	}()
+	client.FinalizeLatest(t, b)
+	commit, stop := cltest.Mine(b, time.Second)
 
 	active := Coordinator{
 		Contract: coordinatorContract,
@@ -272,10 +277,10 @@ func StartNewChainWithContracts(t *testing.T, nClients int) (*bind.TransactOpts,
 		Contract: proposalContract,
 		Address:  proposalAddress,
 	}
-	return owner, b, ticker, active, proposed, clientContracts, routerAddress, routerContract, linkToken, allowListAddress, allowListContract
+	return owner, b, commit, stop, active, proposed, clientContracts, routerAddress, routerContract, linkToken, allowListAddress, allowListContract
 }
 
-func SetupRouterRoutes(t *testing.T, b *backends.SimulatedBackend, owner *bind.TransactOpts, routerContract *functions_router.FunctionsRouter, coordinatorAddress common.Address, proposedCoordinatorAddress common.Address, allowListAddress common.Address) {
+func SetupRouterRoutes(t *testing.T, b evmtypes.Backend, owner *bind.TransactOpts, routerContract *functions_router.FunctionsRouter, coordinatorAddress common.Address, proposedCoordinatorAddress common.Address, allowListAddress common.Address) {
 	allowListId, err := routerContract.GetAllowListId(nilOpts)
 	require.NoError(t, err)
 	var donId [32]byte
@@ -311,14 +316,14 @@ func StartNewNode(
 	t *testing.T,
 	owner *bind.TransactOpts,
 	port int,
-	b *backends.SimulatedBackend,
+	b evmtypes.Backend,
 	maxGas uint32,
 	p2pV2Bootstrappers []commontypes.BootstrapperLocator,
 	ocr2Keystore []byte,
 	thresholdKeyShare string,
 ) *Node {
 	ctx := testutils.Context(t)
-	p2pKey := keystest.NewP2PKeyV2(t)
+	p2pKey := p2pkey.MustNewV2XXXTestingOnly(big.NewInt(int64(port)))
 	config, _ := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 		c.Insecure.OCRDevelopmentMode = ptr(true)
 
@@ -355,10 +360,10 @@ func StartNewNode(
 	transmitter := sendingKeys[0].Address
 
 	// fund the transmitter address
-	n, err := b.NonceAt(testutils.Context(t), owner.From, nil)
+	n, err := b.Client().NonceAt(testutils.Context(t), owner.From, nil)
 	require.NoError(t, err)
 
-	tx := cltest.NewLegacyTransaction(
+	tx := evmtestutils.NewLegacyTransaction(
 		n, transmitter,
 		assets.Ether(1).ToInt(),
 		21000,
@@ -366,7 +371,7 @@ func StartNewNode(
 		nil)
 	signedTx, err := owner.Signer(owner.From, tx)
 	require.NoError(t, err)
-	err = b.SendTransaction(testutils.Context(t), signedTx)
+	err = b.Client().SendTransaction(testutils.Context(t), signedTx)
 	require.NoError(t, err)
 	b.Commit()
 
@@ -505,10 +510,10 @@ func mockEALambdaExecutionResponse(t *testing.T, request map[string]any) []byte 
 	require.Equal(t, functions.LocationInline, int(data["codeLocation"].(float64)))
 	if len(request["nodeProvidedSecrets"].(string)) > 0 {
 		require.Equal(t, functions.LocationRemote, int(data["secretsLocation"].(float64)))
-		require.Equal(t, fmt.Sprintf(`{"0x0":"%s"}`, DefaultSecretsBase64), request["nodeProvidedSecrets"].(string))
+		require.JSONEq(t, fmt.Sprintf(`{"0x0":"%s"}`, DefaultSecretsBase64), request["nodeProvidedSecrets"].(string))
 	}
 	args := data["args"].([]interface{})
-	require.Equal(t, 2, len(args))
+	require.Len(t, args, 2)
 	require.Equal(t, DefaultArg1, args[0].(string))
 	require.Equal(t, DefaultArg2, args[1].(string))
 	source := data["source"].(string)
@@ -539,7 +544,7 @@ func GetExpectedResponse(source []byte) [32]byte {
 func CreateFunctionsNodes(
 	t *testing.T,
 	owner *bind.TransactOpts,
-	b *backends.SimulatedBackend,
+	b evmtypes.Backend,
 	routerAddress common.Address,
 	nOracleNodes int,
 	maxGas int,
@@ -592,20 +597,7 @@ func CreateFunctionsNodes(
 	return bootstrapNode, oracleNodes, oracleIdentites
 }
 
-func ClientTestRequests(
-	t *testing.T,
-	owner *bind.TransactOpts,
-	b *backends.SimulatedBackend,
-	linkToken *link_token_interface.LinkToken,
-	routerAddress common.Address,
-	routerContract *functions_router.FunctionsRouter,
-	allowListContract *functions_allow_list.TermsOfServiceAllowList,
-	clientContracts []deployedClientContract,
-	requestLenBytes int,
-	expectedSecrets []byte,
-	subscriptionId uint64,
-	timeout time.Duration,
-) {
+func ClientTestRequests(t *testing.T, owner *bind.TransactOpts, b evmtypes.Backend, clientContracts []deployedClientContract, requestLenBytes int, expectedSecrets []byte, subscriptionID uint64, timeout time.Duration) {
 	t.Helper()
 	var donId [32]byte
 	copy(donId[:], []byte(DefaultDONId))
@@ -622,12 +614,12 @@ func ClientTestRequests(
 			hex.EncodeToString(requestSources[i]),
 			expectedSecrets,
 			[]string{DefaultArg1, DefaultArg2},
-			subscriptionId,
+			subscriptionID,
 			donId,
 		)
 		require.NoError(t, err)
 	}
-	CommitWithFinality(b)
+	client.FinalizeLatest(t, b)
 
 	// validate that all client contracts got correct responses to their requests
 	var wg sync.WaitGroup

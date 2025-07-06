@@ -11,16 +11,17 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/go-resty/resty/v2"
 	"github.com/rs/zerolog/log"
-	"github.com/smartcontractkit/seth"
 	"github.com/smartcontractkit/tdh2/go/tdh2/tdh2easy"
 
-	"github.com/smartcontractkit/chainlink-testing-framework/networks"
+	ctf_config "github.com/smartcontractkit/chainlink-testing-framework/lib/config"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/networks"
+	seth_utils "github.com/smartcontractkit/chainlink-testing-framework/lib/utils/seth"
+	"github.com/smartcontractkit/chainlink-testing-framework/seth"
 
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
-	tc "github.com/smartcontractkit/chainlink/integration-tests/testconfig"
 	"github.com/smartcontractkit/chainlink/integration-tests/types"
-	"github.com/smartcontractkit/chainlink/integration-tests/utils"
-	chainlinkutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
+
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils"
 )
 
 type FunctionsTest struct {
@@ -50,41 +51,32 @@ type S4SecretsCfg struct {
 	S4SetPayload          string
 }
 
-func SetupLocalLoadTestEnv(globalConfig tc.GlobalTestConfig, functionsConfig types.FunctionsTestConfig) (*FunctionsTest, error) {
+func SetupLocalLoadTestEnv(globalConfig ctf_config.GlobalTestConfig, functionsConfig types.FunctionsTestConfig) (*FunctionsTest, error) {
 	selectedNetwork := networks.MustGetSelectedNetworkConfig(globalConfig.GetNetworkConfig())[0]
-	readSethCfg := globalConfig.GetSethConfig()
-	sethCfg, err := utils.MergeSethAndEvmNetworkConfigs(selectedNetwork, *readSethCfg)
-	if err != nil {
-		return nil, err
-	}
-	err = utils.ValidateSethNetworkConfig(sethCfg.Network)
-	if err != nil {
-		return nil, err
-	}
-	seth, err := seth.NewClientWithConfig(&sethCfg)
+	sethClient, err := seth_utils.GetChainClient(globalConfig, selectedNetwork)
 	if err != nil {
 		return nil, err
 	}
 
 	cfg := functionsConfig.GetFunctionsConfig()
 
-	lt, err := contracts.DeployLinkTokenContract(log.Logger, seth)
+	lt, err := contracts.DeployLinkTokenContract(log.Logger, sethClient)
 	if err != nil {
 		return nil, err
 	}
-	coord, err := contracts.LoadFunctionsCoordinator(seth, *cfg.Common.Coordinator)
+	coord, err := contracts.LoadFunctionsCoordinator(sethClient, *cfg.Common.Coordinator)
 	if err != nil {
 		return nil, err
 	}
-	router, err := contracts.LoadFunctionsRouter(log.Logger, seth, *cfg.Common.Router)
+	router, err := contracts.LoadFunctionsRouter(log.Logger, sethClient, *cfg.Common.Router)
 	if err != nil {
 		return nil, err
 	}
 	var loadTestClient contracts.FunctionsLoadTestClient
 	if cfg.Common.LoadTestClient != nil && *cfg.Common.LoadTestClient != "" {
-		loadTestClient, err = contracts.LoadFunctionsLoadTestClient(seth, *cfg.Common.LoadTestClient)
+		loadTestClient, err = contracts.LoadFunctionsLoadTestClient(sethClient, *cfg.Common.LoadTestClient)
 	} else {
-		loadTestClient, err = contracts.DeployFunctionsLoadTestClient(seth, *cfg.Common.Router)
+		loadTestClient, err = contracts.DeployFunctionsLoadTestClient(sethClient, *cfg.Common.Router)
 	}
 	if err != nil {
 		return nil, err
@@ -95,11 +87,11 @@ func SetupLocalLoadTestEnv(globalConfig tc.GlobalTestConfig, functionsConfig typ
 		if err != nil {
 			return nil, fmt.Errorf("failed to create a new subscription: %w", err)
 		}
-		encodedSubId, err := chainlinkutils.ABIEncode(`[{"type":"uint64"}]`, subID)
+		encodedSubID, err := utils.ABIEncode(`[{"type":"uint64"}]`, subID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode subscription ID for funding: %w", err)
 		}
-		_, err = lt.TransferAndCall(router.Address(), big.NewInt(0).Mul(cfg.Common.SubFunds, big.NewInt(1e18)), encodedSubId)
+		_, err = lt.TransferAndCall(router.Address(), big.NewInt(0).Mul(cfg.Common.SubFunds, big.NewInt(1e18)), encodedSubID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to transferAndCall router, LINK funding: %w", err)
 		}
@@ -129,14 +121,22 @@ func SetupLocalLoadTestEnv(globalConfig tc.GlobalTestConfig, functionsConfig typ
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate tdh2 secrets: %w", err)
 		}
+		randInt := mrand.Intn(5)
+		if randInt < 0 {
+			return nil, fmt.Errorf("negative random int: %d", randInt)
+		}
+		now := time.Now().UnixNano()
+		if now < 0 {
+			return nil, fmt.Errorf("negative timestamp: %d", now)
+		}
 		slotID, slotVersion, err := UploadS4Secrets(resty.New(), &S4SecretsCfg{
 			GatewayURL:            *cfg.Common.GatewayURL,
 			PrivateKey:            selectedNetwork.PrivateKeys[0],
 			MessageID:             strconv.Itoa(mrand.Intn(100000-1) + 1),
 			Method:                "secrets_set",
 			DonID:                 *cfg.Common.DONID,
-			S4SetSlotID:           uint(mrand.Intn(5)),
-			S4SetVersion:          uint64(time.Now().UnixNano()),
+			S4SetSlotID:           uint(randInt),
+			S4SetVersion:          uint64(now),
 			S4SetExpirationPeriod: 60 * 60 * 1000,
 			S4SetPayload:          encryptedSecrets,
 		})
@@ -151,7 +151,7 @@ func SetupLocalLoadTestEnv(globalConfig tc.GlobalTestConfig, functionsConfig typ
 			Msg("Set new secret")
 	}
 	return &FunctionsTest{
-		SethClient:                *seth,
+		SethClient:                *sethClient,
 		LinkToken:                 lt,
 		Coordinator:               coord,
 		Router:                    router,

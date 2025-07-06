@@ -14,13 +14,13 @@ import (
 	ocr2types "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
+
+	serializablebig "github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	serializablebig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/median/config"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
-
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
@@ -193,7 +193,7 @@ func (ds *inMemoryDataSource) executeRun(ctx context.Context) (*pipeline.Run, pi
 		},
 	})
 
-	run, trrs, err := ds.pipelineRunner.ExecuteRun(ctx, ds.spec, vars, ds.lggr)
+	run, trrs, err := ds.pipelineRunner.ExecuteRun(ctx, ds.spec, vars)
 	if err != nil {
 		return nil, pipeline.TaskRunResults{}, errors.Wrapf(err, "error executing run for spec ID %v", ds.spec.ID)
 	}
@@ -227,7 +227,7 @@ func (ds *inMemoryDataSource) Observe(ctx context.Context, timestamp ocr2types.R
 		return nil, err
 	}
 
-	finalResult := trrs.FinalResult(ds.lggr)
+	finalResult := trrs.FinalResult()
 	setEATelemetry(ds, finalResult, trrs, ObservationTimestamp{
 		Round:        timestamp.Round,
 		Epoch:        timestamp.Epoch,
@@ -270,7 +270,7 @@ func (ds *inMemoryDataSourceCache) Close() error {
 func (ds *inMemoryDataSourceCache) updater() {
 	ticker := time.NewTicker(ds.updateInterval)
 	updateCache := func() {
-		ctx, cancel := ds.chStop.CtxCancel(context.WithTimeout(context.Background(), time.Second*10))
+		ctx, cancel := ds.chStop.CtxWithTimeout(time.Second * 10)
 		defer cancel()
 		if err := ds.updateCache(ctx); err != nil {
 			ds.lggr.Warnf("failed to update cache, err: %v", err)
@@ -310,7 +310,7 @@ func (ds *inMemoryDataSourceCache) updateCache(ctx context.Context) error {
 		return errors.Wrapf(ds.latestUpdateErr, "error updating in memory data source cache for spec ID %v", ds.spec.ID)
 	}
 
-	value, err := ds.inMemoryDataSource.parse(latestTrrs.FinalResult(ds.lggr))
+	value, err := ds.inMemoryDataSource.parse(latestTrrs.FinalResult())
 	if err != nil {
 		ds.latestUpdateErr = errors.Wrapf(err, "invalid result")
 		return ds.latestUpdateErr
@@ -318,7 +318,7 @@ func (ds *inMemoryDataSourceCache) updateCache(ctx context.Context) error {
 
 	// update cache values
 	ds.latestTrrs = latestTrrs
-	ds.latestResult = ds.latestTrrs.FinalResult(ds.lggr)
+	ds.latestResult = ds.latestTrrs.FinalResult()
 	ds.latestUpdateErr = nil
 
 	// backup in case data source fails continuously and node gets rebooted
@@ -384,7 +384,6 @@ func (ds *inMemoryDataSourceCache) Observe(ctx context.Context, timestamp ocr2ty
 		if time.Since(ds.latestTrrs.GetTaskRunResultsFinishedAt()) >= ds.stalenessAlertThreshold {
 			ds.lggr.Errorf("in memory cache is old and hasn't been updated for over %v, latestUpdateErr is: %v", ds.stalenessAlertThreshold, ds.latestUpdateErr)
 		}
-
 	}
 	return ds.parse(latestResult)
 }
@@ -403,7 +402,7 @@ func (ds *dataSourceBase) observe(ctx context.Context, timestamp ObservationTime
 	// a db write block that.
 	ds.saver.Save(run)
 
-	finalResult := trrs.FinalResult(ds.lggr)
+	finalResult := trrs.FinalResult()
 	setEATelemetry(&ds.inMemoryDataSource, finalResult, trrs, timestamp)
 
 	return ds.inMemoryDataSource.parse(finalResult)

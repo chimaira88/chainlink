@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	libocr_median "github.com/smartcontractkit/libocr/offchainreporting2/reportingplugin/median"
 	libocr "github.com/smartcontractkit/libocr/offchainreporting2plus"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/loop"
@@ -62,14 +63,13 @@ func NewMedianServices(ctx context.Context,
 	cfg MedianConfig,
 	chEnhancedTelem chan ocrcommon.EnhancedTelemetryData,
 	errorLog loop.ErrorLog,
-
 ) (srvs []job.ServiceCtx, err error) {
 	var pluginConfig config.PluginConfig
 	err = json.Unmarshal(jb.OCR2OracleSpec.PluginConfig.Bytes(), &pluginConfig)
 	if err != nil {
 		return
 	}
-	err = config.ValidatePluginConfig(pluginConfig)
+	err = pluginConfig.ValidatePluginConfig()
 	if err != nil {
 		return
 	}
@@ -85,6 +85,7 @@ func NewMedianServices(ctx context.Context,
 	provider, err := relayer.NewPluginProvider(ctx, types.RelayArgs{
 		ExternalJobID: jb.ExternalJobID,
 		JobID:         jb.ID,
+		OracleSpecID:  *jb.OCR2OracleSpecID,
 		ContractID:    spec.ContractID,
 		New:           isNewlyCreatedJob,
 		RelayConfig:   spec.RelayConfig.Bytes(),
@@ -136,6 +137,17 @@ func NewMedianServices(ctx context.Context,
 		srvs = append(srvs, juelsPerFeeCoinSourceCache)
 	}
 
+	var gasPriceSubunitsDataSource libocr_median.DataSource
+	if pluginConfig.HasGasPriceSubunitsPipeline() {
+		gasPriceSubunitsDataSource = ocrcommon.NewInMemoryDataSource(pipelineRunner, jb, pipeline.Spec{
+			ID:           jb.ID,
+			DotDagSource: pluginConfig.GasPriceSubunitsPipeline,
+			CreatedAt:    time.Now(),
+		}, lggr)
+	} else {
+		gasPriceSubunitsDataSource = &median.ZeroDataSource{}
+	}
+
 	if cmdName := env.MedianPlugin.Cmd.Get(); cmdName != "" {
 		// use unique logger names so we can use it to register a loop
 		medianLggr := lggr.Named("Median").Named(spec.ContractID).Named(spec.GetID())
@@ -155,11 +167,11 @@ func NewMedianServices(ctx context.Context,
 			abort()
 			return
 		}
-		median := loop.NewMedianService(lggr, telem, cmdFn, medianProvider, dataSource, juelsPerFeeCoinSource, errorLog)
+		median := loop.NewMedianService(lggr, telem, cmdFn, medianProvider, spec.ContractID, dataSource, juelsPerFeeCoinSource, gasPriceSubunitsDataSource, errorLog, pluginConfig.DeviationFunctionDefinition)
 		argsNoPlugin.ReportingPluginFactory = median
 		srvs = append(srvs, median)
 	} else {
-		argsNoPlugin.ReportingPluginFactory, err = median.NewPlugin(lggr).NewMedianFactory(ctx, medianProvider, dataSource, juelsPerFeeCoinSource, errorLog)
+		argsNoPlugin.ReportingPluginFactory, err = median.NewPlugin(lggr).NewMedianFactory(ctx, medianProvider, spec.ContractID, dataSource, juelsPerFeeCoinSource, gasPriceSubunitsDataSource, errorLog, pluginConfig.DeviationFunctionDefinition)
 		if err != nil {
 			err = fmt.Errorf("failed to create median factory: %w", err)
 			abort()

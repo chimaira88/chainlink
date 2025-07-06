@@ -51,9 +51,6 @@ func init() {
 
 var _ common.Logger = (Logger)(nil)
 
-//go:generate mockery --quiet --name Logger --output . --filename logger_mock_test.go --inpackage --case=underscore
-//go:generate mockery --quiet --name Logger --output ./mocks/ --case=underscore
-
 // Logger is the main interface of this package.
 // It implements uber/zap's SugaredLogger interface and adds conditional logging helpers.
 //
@@ -74,6 +71,7 @@ var _ common.Logger = (Logger)(nil)
 //   - Trace: Only included if compiled with the trace tag. For example: go test -tags trace ...
 //
 // Node Operator Docs: https://docs.chain.link/docs/configuration-variables/#log_level
+// Deprecated: use [common.Logger] & [common.SugaredLogger]
 type Logger interface {
 	// With creates a new Logger with the given arguments
 	With(args ...interface{}) Logger
@@ -165,6 +163,7 @@ type Config struct {
 	FileMaxSizeMB  int
 	FileMaxAgeDays int
 	FileMaxBackups int // files
+	SentryEnabled  bool
 
 	diskSpaceAvailableFn diskSpaceAvailableFn
 	diskPollConfig       zapDiskPollConfig
@@ -198,7 +197,9 @@ func (c *Config) New() (Logger, func() error) {
 		log.Fatal(err)
 	}
 
-	l = newSentryLogger(l)
+	if c.SentryEnabled {
+		l = newSentryLogger(l)
+	}
 	l = newPrometheusLogger(l)
 	l = l.With("version", verShaNameStatic())
 	return l, closeLogger

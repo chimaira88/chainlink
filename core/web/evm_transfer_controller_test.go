@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"math/big"
 	"net/http"
 	"testing"
@@ -12,10 +12,9 @@ import (
 
 	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	ubig "github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest"
@@ -42,8 +41,9 @@ func TestTransfersController_CreateSuccess_From(t *testing.T) {
 	balance, err := assets.NewEthValueS("200")
 	require.NoError(t, err)
 
-	ethClient.On("PendingNonceAt", mock.Anything, key.Address).Return(uint64(1), nil)
+	ethClient.On("PendingNonceAt", mock.Anything, key.Address).Return(uint64(1), nil).Maybe()
 	ethClient.On("BalanceAt", mock.Anything, key.Address, (*big.Int)(nil)).Return(balance.ToInt(), nil)
+	ethClient.On("NonceAt", mock.Anything, mock.Anything, mock.Anything).Return(uint64(0), nil).Once()
 
 	app := cltest.NewApplicationWithKey(t, ethClient, key)
 	require.NoError(t, app.Start(testutils.Context(t)))
@@ -69,7 +69,7 @@ func TestTransfersController_CreateSuccess_From(t *testing.T) {
 
 	errors := cltest.ParseJSONAPIErrors(t, resp.Body)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Len(t, errors.Errors, 0)
+	assert.Empty(t, errors.Errors)
 
 	validateTxCount(t, app.GetDB(), 1)
 }
@@ -84,8 +84,9 @@ func TestTransfersController_CreateSuccess_From_WEI(t *testing.T) {
 	balance, err := assets.NewEthValueS("2")
 	require.NoError(t, err)
 
-	ethClient.On("PendingNonceAt", mock.Anything, key.Address).Return(uint64(1), nil)
+	ethClient.On("PendingNonceAt", mock.Anything, key.Address).Return(uint64(1), nil).Maybe()
 	ethClient.On("BalanceAt", mock.Anything, key.Address, (*big.Int)(nil)).Return(balance.ToInt(), nil)
+	ethClient.On("NonceAt", mock.Anything, mock.Anything, mock.Anything).Return(uint64(0), nil).Once()
 
 	app := cltest.NewApplicationWithKey(t, ethClient, key)
 	require.NoError(t, app.Start(testutils.Context(t)))
@@ -110,7 +111,7 @@ func TestTransfersController_CreateSuccess_From_WEI(t *testing.T) {
 
 	errors := cltest.ParseJSONAPIErrors(t, resp.Body)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Len(t, errors.Errors, 0)
+	assert.Empty(t, errors.Errors)
 
 	validateTxCount(t, app.GetDB(), 1)
 }
@@ -125,8 +126,9 @@ func TestTransfersController_CreateSuccess_From_BalanceMonitorDisabled(t *testin
 	balance, err := assets.NewEthValueS("200")
 	require.NoError(t, err)
 
-	ethClient.On("PendingNonceAt", mock.Anything, key.Address).Return(uint64(1), nil)
+	ethClient.On("PendingNonceAt", mock.Anything, key.Address).Return(uint64(1), nil).Maybe()
 	ethClient.On("BalanceAt", mock.Anything, key.Address, (*big.Int)(nil)).Return(balance.ToInt(), nil)
+	ethClient.On("NonceAt", mock.Anything, mock.Anything, mock.Anything).Return(uint64(0), nil).Once()
 
 	config := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 		c.EVM[0].BalanceMonitor.Enabled = ptr(false)
@@ -156,7 +158,7 @@ func TestTransfersController_CreateSuccess_From_BalanceMonitorDisabled(t *testin
 
 	errors := cltest.ParseJSONAPIErrors(t, resp.Body)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Len(t, errors.Errors, 0)
+	assert.Empty(t, errors.Errors)
 
 	validateTxCount(t, app.GetDB(), 1)
 }
@@ -194,8 +196,9 @@ func TestTransfersController_TransferBalanceToLowError(t *testing.T) {
 
 	ethClient := cltest.NewEthMocksWithTransactionsOnBlocksAssertions(t)
 
-	ethClient.On("PendingNonceAt", mock.Anything, key.Address).Return(uint64(1), nil)
+	ethClient.On("PendingNonceAt", mock.Anything, key.Address).Return(uint64(1), nil).Maybe()
 	ethClient.On("BalanceAt", mock.Anything, key.Address, (*big.Int)(nil)).Return(assets.NewEth(10).ToInt(), nil)
+	ethClient.On("NonceAt", mock.Anything, mock.Anything, mock.Anything).Return(uint64(0), nil).Once()
 
 	app := cltest.NewApplicationWithKey(t, ethClient, key)
 	require.NoError(t, app.Start(testutils.Context(t)))
@@ -232,8 +235,9 @@ func TestTransfersController_TransferBalanceToLowError_ZeroBalance(t *testing.T)
 	balance, err := assets.NewEthValueS("0")
 	require.NoError(t, err)
 
-	ethClient.On("PendingNonceAt", mock.Anything, key.Address).Return(uint64(1), nil)
+	ethClient.On("PendingNonceAt", mock.Anything, key.Address).Return(uint64(1), nil).Maybe()
 	ethClient.On("BalanceAt", mock.Anything, key.Address, (*big.Int)(nil)).Return(balance.ToInt(), nil)
+	ethClient.On("NonceAt", mock.Anything, mock.Anything, mock.Anything).Return(uint64(0), nil).Once()
 
 	app := cltest.NewApplicationWithKey(t, ethClient, key)
 	require.NoError(t, app.Start(testutils.Context(t)))
@@ -268,7 +272,7 @@ func TestTransfersController_JSONBindingError(t *testing.T) {
 
 	client := app.NewHTTPClient(nil)
 
-	resp, cleanup := client.Post("/v2/transfers", bytes.NewBuffer([]byte(`{"address":""}`)))
+	resp, cleanup := client.Post("/v2/transfers", bytes.NewBufferString(`{"address":""}`))
 	t.Cleanup(cleanup)
 
 	cltest.AssertServerResponse(t, resp, http.StatusBadRequest)
@@ -286,7 +290,7 @@ func TestTransfersController_CreateSuccess_eip1559(t *testing.T) {
 
 	ethClient.On("PendingNonceAt", mock.Anything, key.Address).Return(uint64(1), nil)
 	ethClient.On("BalanceAt", mock.Anything, key.Address, (*big.Int)(nil)).Return(balance.ToInt(), nil)
-	ethClient.On("SequenceAt", mock.Anything, mock.Anything, mock.Anything).Return(evmtypes.Nonce(0), nil).Maybe()
+	ethClient.On("NonceAt", mock.Anything, mock.Anything, mock.Anything).Return(uint64(0), nil)
 
 	config := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 		c.EVM[0].GasEstimator.EIP1559DynamicFees = ptr(true)
@@ -363,7 +367,7 @@ func TestTransfersController_FindTxAttempt(t *testing.T) {
 	t.Run("failed to find tx", func(t *testing.T) {
 		ctx := testutils.Context(t)
 		find := func(_ context.Context, _ int64) (txmgr.Tx, error) {
-			return txmgr.Tx{}, fmt.Errorf("ERRORED")
+			return txmgr.Tx{}, errors.New("ERRORED")
 		}
 		_, err := web.FindTxAttempt(ctx, time.Second, tx, find)
 		assert.ErrorContains(t, err, "failed to find transaction")

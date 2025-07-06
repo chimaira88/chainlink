@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hashicorp/consul/sdk/freeport"
 	"github.com/pelletier/go-toml"
 	"github.com/pkg/errors"
 	"github.com/shopspring/decimal"
@@ -23,14 +22,15 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v4"
 
+	"github.com/smartcontractkit/freeport"
+
 	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/jsonserializable"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox/mailboxtest"
-
+	"github.com/smartcontractkit/chainlink-evm/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/auth"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest"
@@ -44,7 +44,6 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/validate"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocrcommon"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
-	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 	"github.com/smartcontractkit/chainlink/v2/core/services/telemetry"
 	"github.com/smartcontractkit/chainlink/v2/core/services/webhook"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
@@ -84,8 +83,15 @@ func TestRunner(t *testing.T) {
 	require.NoError(t, pipelineORM.Start(ctx))
 	t.Cleanup(func() { assert.NoError(t, pipelineORM.Close()) })
 	btORM := bridges.NewORM(db)
-	relayExtenders := evmtest.NewChainRelayExtenders(t, evmtest.TestChainOpts{DB: db, Client: ethClient, GeneralConfig: config, KeyStore: ethKeyStore})
-	legacyChains := evmrelay.NewLegacyChainsFromRelayerExtenders(relayExtenders)
+	legacyChains := evmtest.NewLegacyChains(t, evmtest.TestChainOpts{
+		DB:             db,
+		Client:         ethClient,
+		ChainConfigs:   config.EVMConfigs(),
+		DatabaseConfig: config.Database(),
+		FeatureConfig:  config.Feature(),
+		ListenerConfig: config.Database().Listener(),
+		KeyStore:       keyStore.Eth(),
+	})
 	c := clhttptest.NewTestLocalOnlyHTTPClient()
 
 	runner := pipeline.NewRunner(pipelineORM, btORM, config.JobPipeline(), config.WebServer(), legacyChains, nil, nil, logger.TestLogger(t), c, c)
@@ -127,14 +133,14 @@ func TestRunner(t *testing.T) {
 
 		m, err := bridges.MarshalBridgeMetaData(big.NewInt(10), big.NewInt(100))
 		require.NoError(t, err)
-		runID, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(map[string]interface{}{"jobRun": map[string]interface{}{"meta": m}}), logger.TestLogger(t), true)
+		runID, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(map[string]interface{}{"jobRun": map[string]interface{}{"meta": m}}), true)
 		require.NoError(t, err)
 
-		results := taskResults.FinalResult(logger.TestLogger(t))
+		results := taskResults.FinalResult()
 		require.Len(t, results.Values, 2)
 		require.GreaterOrEqual(t, len(results.FatalErrors), 2)
-		assert.Nil(t, results.FatalErrors[0])
-		assert.Nil(t, results.FatalErrors[1])
+		assert.NoError(t, results.FatalErrors[0])
+		assert.NoError(t, results.FatalErrors[1])
 		require.GreaterOrEqual(t, len(results.AllErrors), 2)
 		assert.Equal(t, "6225.6", results.Values[0].(decimal.Decimal).String())
 		assert.Equal(t, "Hal Finney", results.Values[1].(string))
@@ -156,7 +162,9 @@ func TestRunner(t *testing.T) {
 			} else if run.GetDotID() == "ds2_multiply" {
 				assert.Equal(t, "6194.2", run.Output.Val)
 			} else if run.GetDotID() == "ds1" {
-				assert.Equal(t, `{"data": {"result": 62.57}}`, run.Output.Val)
+				s, ok := run.Output.Val.(string)
+				require.True(t, ok)
+				assert.JSONEq(t, `{"data": {"result": 62.57}}`, s)
 			} else if run.GetDotID() == "ds1_parse" {
 				assert.Equal(t, float64(62.57), run.Output.Val)
 			} else if run.GetDotID() == "ds1_multiply" {
@@ -184,13 +192,13 @@ func TestRunner(t *testing.T) {
 		// Should not be able to delete a bridge in use.
 		jids, err := jobORM.FindJobIDsWithBridge(ctx, bridge.Name.String())
 		require.NoError(t, err)
-		require.Equal(t, 1, len(jids))
+		require.Len(t, jids, 1)
 
 		// But if we delete the job, then we can.
-		require.NoError(t, jobORM.DeleteJob(ctx, jb.ID))
+		require.NoError(t, jobORM.DeleteJob(ctx, jb.ID, jb.Type))
 		jids, err = jobORM.FindJobIDsWithBridge(ctx, bridge.Name.String())
 		require.NoError(t, err)
-		require.Equal(t, 0, len(jids))
+		require.Empty(t, jids)
 	})
 
 	t.Run("referencing a non-existent bridge should error", func(t *testing.T) {
@@ -318,10 +326,10 @@ answer1      [type=median index=0];
 		err := jobORM.CreateJob(ctx, jb)
 		require.NoError(t, err)
 
-		runID, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), logger.TestLogger(t), true)
+		runID, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), true)
 		require.NoError(t, err)
 
-		results := taskResults.FinalResult(logger.TestLogger(t))
+		results := taskResults.FinalResult()
 		assert.Len(t, results.FatalErrors, 1)
 		assert.Len(t, results.Values, 1)
 		assert.Contains(t, results.FatalErrors[0].Error(), "type <nil> cannot be converted to decimal.Decimal")
@@ -364,10 +372,10 @@ answer1      [type=median index=0];
 		err := jobORM.CreateJob(testutils.Context(t), jb)
 		require.NoError(t, err)
 
-		runID, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), logger.TestLogger(t), true)
+		runID, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), true)
 		require.NoError(t, err)
 
-		results := taskResults.FinalResult(logger.TestLogger(t))
+		results := taskResults.FinalResult()
 		assert.Len(t, results.Values, 1)
 		assert.Len(t, results.FatalErrors, 1)
 		assert.Contains(t, results.FatalErrors[0].Error(), pipeline.ErrTooManyErrors.Error())
@@ -409,10 +417,10 @@ answer1      [type=median index=0];
 		err := jobORM.CreateJob(testutils.Context(t), jb)
 		require.NoError(t, err)
 
-		runID, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), logger.TestLogger(t), true)
+		runID, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), true)
 		require.NoError(t, err)
 
-		results := taskResults.FinalResult(logger.TestLogger(t))
+		results := taskResults.FinalResult()
 		assert.Len(t, results.Values, 1)
 		assert.Contains(t, results.FatalErrors[0].Error(), "type <nil> cannot be converted to decimal.Decimal")
 		assert.Nil(t, results.Values[0])
@@ -466,7 +474,8 @@ answer1      [type=median index=0];
 		sd := ocr.NewDelegate(
 			db,
 			jobORM,
-			keyStore,
+			ethKeyStore,
+			keyStore.OCR(),
 			nil,
 			pw,
 			monitoringEndpoint,
@@ -501,7 +510,8 @@ answer1      [type=median index=0];
 		sd := ocr.NewDelegate(
 			db,
 			jobORM,
-			keyStore,
+			ethKeyStore,
+			keyStore.OCR(),
 			nil,
 			pw,
 			monitoringEndpoint,
@@ -529,7 +539,8 @@ answer1      [type=median index=0];
 		sd := ocr.NewDelegate(
 			db,
 			jobORM,
-			keyStore,
+			ethKeyStore,
+			keyStore.OCR(),
 			nil,
 			pw,
 			monitoringEndpoint,
@@ -555,21 +566,27 @@ answer1      [type=median index=0];
 		}
 
 		for _, tc := range testCases {
-
 			config = configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 				c.P2P.V2.Enabled = ptr(true)
 				c.P2P.V2.ListenAddresses = &[]string{fmt.Sprintf("127.0.0.1:%d", freeport.GetOne(t))}
 				c.OCR.CaptureEATelemetry = ptr(tc.specCaptureEATelemetry)
 			})
 
-			relayExtenders = evmtest.NewChainRelayExtenders(t, evmtest.TestChainOpts{DB: db, Client: ethClient, GeneralConfig: config, KeyStore: ethKeyStore})
-			legacyChains = evmrelay.NewLegacyChainsFromRelayerExtenders(relayExtenders)
+			legacyChains2 := evmtest.NewLegacyChains(t, evmtest.TestChainOpts{
+				DB:             db,
+				Client:         ethClient,
+				ChainConfigs:   config.EVMConfigs(),
+				DatabaseConfig: config.Database(),
+				FeatureConfig:  config.Feature(),
+				ListenerConfig: config.Database().Listener(),
+				KeyStore:       ethKeyStore,
+			})
 
 			kb, err := keyStore.OCR().Create(ctx)
 			require.NoError(t, err)
 
 			s := fmt.Sprintf(minimalNonBootstrapTemplate, cltest.NewEIP55Address(), transmitterAddress.Hex(), kb.ID(), "http://blah.com", "")
-			jb, err := ocr.ValidatedOracleSpecToml(config, legacyChains, s)
+			jb, err := ocr.ValidatedOracleSpecToml(config, legacyChains2, s)
 			require.NoError(t, err)
 			err = toml.Unmarshal([]byte(s), &jb)
 			require.NoError(t, err)
@@ -585,11 +602,12 @@ answer1      [type=median index=0];
 			sd := ocr.NewDelegate(
 				db,
 				jobORM,
-				keyStore,
+				ethKeyStore,
+				keyStore.OCR(),
 				nil,
 				pw,
 				monitoringEndpoint,
-				legacyChains,
+				legacyChains2,
 				lggr,
 				config,
 				servicetest.Run(t, mailboxtest.NewMonitor(t)),
@@ -630,7 +648,8 @@ answer1      [type=median index=0];
 		sd := ocr.NewDelegate(
 			db,
 			jobORM,
-			keyStore,
+			ethKeyStore,
+			keyStore.OCR(),
 			nil,
 			pw,
 			monitoringEndpoint,
@@ -664,12 +683,12 @@ answer1      [type=median index=0];
 		}
 
 		// Ensure we can delete an errored
-		err = jobORM.DeleteJob(ctx, jb.ID)
+		err = jobORM.DeleteJob(ctx, jb.ID, jb.Type)
 		require.NoError(t, err)
 		se = []job.SpecError{}
 		err = db.Select(&se, `SELECT * FROM job_spec_errors`)
 		require.NoError(t, err)
-		require.Len(t, se, 0)
+		require.Empty(t, se)
 
 		// TODO: This breaks the txdb connection, failing subsequent tests. Resolve in the future
 		// Noop once the job is gone.
@@ -698,9 +717,9 @@ answer1      [type=median index=0];
 		err := jobORM.CreateJob(ctx, jb)
 		require.NoError(t, err)
 
-		_, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), logger.TestLogger(t), true)
+		_, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), true)
 		require.NoError(t, err)
-		results := taskResults.FinalResult(logger.TestLogger(t))
+		results := taskResults.FinalResult()
 		assert.Nil(t, results.Values[0])
 
 		// No task timeout should succeed.
@@ -708,11 +727,11 @@ answer1      [type=median index=0];
 		jb.Name = null.NewString("a job 2", true)
 		err = jobORM.CreateJob(ctx, jb)
 		require.NoError(t, err)
-		_, taskResults, err = runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), logger.TestLogger(t), true)
+		_, taskResults, err = runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), true)
 		require.NoError(t, err)
-		results = taskResults.FinalResult(logger.TestLogger(t))
+		results = taskResults.FinalResult()
 		assert.Equal(t, 10.1, results.Values[0])
-		assert.Nil(t, results.FatalErrors[0])
+		assert.NoError(t, results.FatalErrors[0])
 
 		// Job specified task timeout should fail.
 		jb = makeMinimalHTTPOracleSpec(t, db, config, cltest.NewEIP55Address().String(), transmitterAddress.Hex(), cltest.DefaultOCRKeyBundleID, serv.URL, "")
@@ -721,10 +740,10 @@ answer1      [type=median index=0];
 		err = jobORM.CreateJob(ctx, jb)
 		require.NoError(t, err)
 
-		_, taskResults, err = runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), logger.TestLogger(t), true)
+		_, taskResults, err = runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), true)
 		require.NoError(t, err)
-		resultsNoFatalErrs := taskResults.FinalResult(logger.TestLogger(t))
-		assert.NotNil(t, resultsNoFatalErrs.FatalErrors[0])
+		resultsNoFatalErrs := taskResults.FinalResult()
+		assert.Error(t, resultsNoFatalErrs.FatalErrors[0])
 	})
 
 	t.Run("deleting jobs", func(t *testing.T) {
@@ -741,19 +760,19 @@ answer1      [type=median index=0];
 		err := jobORM.CreateJob(ctx, jb)
 		require.NoError(t, err)
 
-		_, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), logger.TestLogger(t), true)
+		_, taskResults, err := runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), true)
 		require.NoError(t, err)
-		results := taskResults.FinalResult(logger.TestLogger(t))
+		results := taskResults.FinalResult()
 		assert.Len(t, results.Values, 1)
-		assert.Nil(t, results.FatalErrors[0])
+		assert.NoError(t, results.FatalErrors[0])
 		assert.Equal(t, "4242", results.Values[0].(decimal.Decimal).String())
 
 		// Delete the job
-		err = jobORM.DeleteJob(ctx, jb.ID)
+		err = jobORM.DeleteJob(ctx, jb.ID, jb.Type)
 		require.NoError(t, err)
 
 		// Create another run, it should fail
-		_, _, err = runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), logger.TestLogger(t), true)
+		_, _, err = runner.ExecuteAndInsertFinishedRun(testutils.Context(t), *jb.PipelineSpec, pipeline.NewVarsFrom(nil), true)
 		require.Error(t, err)
 	})
 }

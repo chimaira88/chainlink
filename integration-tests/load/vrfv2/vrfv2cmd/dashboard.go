@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	db "github.com/smartcontractkit/wasp/dashboard"
+	db "github.com/smartcontractkit/chainlink-testing-framework/wasp/dashboard"
 
 	"github.com/K-Phoen/grabana/dashboard"
 	"github.com/K-Phoen/grabana/logs"
@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	//TODO switch to TOML too?
+	// TODO switch to TOML too?
 	lokiDS := os.Getenv("DATA_SOURCE_NAME")
 	d, err := db.NewDashboard(nil,
 		[]dashboard.Option{

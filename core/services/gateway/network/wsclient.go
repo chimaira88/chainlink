@@ -9,7 +9,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 )
 
 type WebSocketClient interface {
@@ -33,13 +33,13 @@ func NewWebSocketClient(config WebSocketClientConfig, initiator ConnectionInitia
 	client := &webSocketClient{
 		initiator: initiator,
 		dialer:    dialer,
-		lggr:      lggr.Named("WebSocketClient"),
+		lggr:      logger.Named(lggr, "WebSocketClient"),
 	}
 	return client
 }
 
 func (c *webSocketClient) Connect(ctx context.Context, url *url.URL) (*websocket.Conn, error) {
-	authHeader, err := c.initiator.NewAuthHeader(url)
+	authHeader, err := c.initiator.NewAuthHeader(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +51,7 @@ func (c *webSocketClient) Connect(ctx context.Context, url *url.URL) (*websocket
 	conn, resp, err := c.dialer.DialContext(ctx, url.String(), hdr)
 
 	if err != nil {
-		c.lggr.Errorf("WebSocketClient: couldn't connect to %s: %w", url.String(), err)
+		c.lggr.Errorf("WebSocketClient: couldn't connect to %s: %v", url.String(), err)
 		c.tryCloseConn(conn)
 		return nil, err
 	}
@@ -69,15 +69,15 @@ func (c *webSocketClient) Connect(ctx context.Context, url *url.URL) (*websocket
 		return nil, err
 	}
 
-	response, err := c.initiator.ChallengeResponse(url, challenge)
+	response, err := c.initiator.ChallengeResponse(ctx, url, challenge)
 	if err != nil {
-		c.lggr.Errorf("WebSocketClient: couldn't generate challenge response", err)
+		c.lggr.Errorw("WebSocketClient: couldn't generate challenge response", "err", err)
 		c.tryCloseConn(conn)
 		return nil, err
 	}
 
 	if err = conn.WriteMessage(websocket.BinaryMessage, response); err != nil {
-		c.lggr.Errorf("WebSocketClient: couldn't send challenge response", err)
+		c.lggr.Errorw("WebSocketClient: couldn't send challenge response", "err", err)
 		c.tryCloseConn(conn)
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (c *webSocketClient) tryCloseConn(conn *websocket.Conn) {
 	if conn != nil {
 		err := conn.Close()
 		if err != nil {
-			c.lggr.Errorf("WebSocketClient: error closing connection %w", err)
+			c.lggr.Errorf("WebSocketClient: error closing connection %v", err)
 		}
 	}
 }

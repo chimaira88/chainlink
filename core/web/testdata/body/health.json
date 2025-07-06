@@ -42,7 +42,7 @@
       "attributes": {
         "name": "EVM.0.HeadTracker.HeadListener",
         "status": "failing",
-        "output": "Listener is not connected"
+        "output": "Listener connected = false, receiving heads = false"
       }
     },
     {
@@ -50,6 +50,15 @@
       "id": "EVM.0.LogBroadcaster",
       "attributes": {
         "name": "EVM.0.LogBroadcaster",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "EVM.0.Relayer",
+      "attributes": {
+        "name": "EVM.0.Relayer",
         "status": "passing",
         "output": ""
       }
@@ -92,6 +101,15 @@
     },
     {
       "type": "checks",
+      "id": "EVM.0.Txm.Finalizer",
+      "attributes": {
+        "name": "EVM.0.Txm.Finalizer",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
       "id": "EVM.0.Txm.WrappedEvmEstimator",
       "attributes": {
         "name": "EVM.0.Txm.WrappedEvmEstimator",
@@ -101,9 +119,36 @@
     },
     {
       "type": "checks",
+      "id": "HeadReporter",
+      "attributes": {
+        "name": "HeadReporter",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "Heartbeat",
+      "attributes": {
+        "name": "Heartbeat",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
       "id": "JobSpawner",
       "attributes": {
         "name": "JobSpawner",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "LLOTransmissionReaper",
+      "attributes": {
+        "name": "LLOTransmissionReaper",
         "status": "passing",
         "output": ""
       }
@@ -155,9 +200,54 @@
     },
     {
       "type": "checks",
-      "id": "PromReporter",
+      "id": "PipelineRunner.BridgeCache",
       "attributes": {
-        "name": "PromReporter",
+        "name": "PipelineRunner.BridgeCache",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "RetirementReportCache",
+      "attributes": {
+        "name": "RetirementReportCache",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "Solana.Bar.Chain",
+      "attributes": {
+        "name": "Solana.Bar.Chain",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "Solana.Bar.Chain.BalanceMonitor",
+      "attributes": {
+        "name": "Solana.Bar.Chain.BalanceMonitor",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "Solana.Bar.Chain.Txm",
+      "attributes": {
+        "name": "Solana.Bar.Chain.Txm",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "Solana.Bar.Relayer",
+      "attributes": {
+        "name": "Solana.Bar.Relayer",
         "status": "passing",
         "output": ""
       }
@@ -167,6 +257,15 @@
       "id": "TelemetryManager",
       "attributes": {
         "name": "TelemetryManager",
+        "status": "passing",
+        "output": ""
+      }
+    },
+    {
+      "type": "checks",
+      "id": "WorkflowStore",
+      "attributes": {
+        "name": "WorkflowStore",
         "status": "passing",
         "output": ""
       }

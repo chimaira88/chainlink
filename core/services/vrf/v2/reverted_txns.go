@@ -18,12 +18,12 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
-	txmgrcommon "github.com/smartcontractkit/chainlink/v2/common/txmgr"
-	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	evmutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_coordinator_v2"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrf_coordinator_v2"
+	evmclient "github.com/smartcontractkit/chainlink-evm/pkg/client"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
+	evmutils "github.com/smartcontractkit/chainlink-evm/pkg/utils"
+	txmgrcommon "github.com/smartcontractkit/chainlink-framework/chains/txmgr"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
@@ -111,7 +111,6 @@ func (lsn *listenerV2) fetchRecentSingleTxns(ctx context.Context,
 	ds sqlutil.DataSource,
 	chainID uint64,
 	pollPeriod time.Duration) ([]TxnReceiptDB, error) {
-
 	// (state = 'confirmed' OR state = 'unconfirmed')
 	sqlQuery := fmt.Sprintf(`
 		WITH already_ff as (
@@ -234,7 +233,6 @@ func (lsn *listenerV2) fetchRevertedForceFulfilmentTxns(ctx context.Context,
 	ds sqlutil.DataSource,
 	chainID uint64,
 	pollPeriod time.Duration) ([]TxnReceiptDB, error) {
-
 	sqlQuery := fmt.Sprintf(`
 		WITH txes AS (
 			SELECT *
@@ -416,7 +414,6 @@ func (lsn *listenerV2) postSqlLog(ctx context.Context, begin time.Time, pollPeri
 
 func (lsn *listenerV2) filterRevertedTxns(ctx context.Context,
 	recentReceipts []TxnReceiptDB) []RevertedVRFTxn {
-
 	revertedVRFTxns := make([]RevertedVRFTxn, 0)
 	for _, txnReceipt := range recentReceipts {
 		switch txnReceipt.ToAddress.Hex() {
@@ -471,7 +468,6 @@ func (lsn *listenerV2) filterRevertedTxns(ctx context.Context,
 func (lsn *listenerV2) filterSingleRevertedTxn(ctx context.Context,
 	txnReceiptDB TxnReceiptDB) (
 	*RevertedVRFTxn, error) {
-
 	requestID := common.HexToHash(txnReceiptDB.RequestID).Big()
 	commitment, err := lsn.coordinator.GetCommitment(&bind.CallOpts{Context: ctx}, requestID)
 	if err != nil {
@@ -500,7 +496,7 @@ func (lsn *listenerV2) filterSingleRevertedTxn(ctx context.Context,
 	}
 	_, rpcError := ethClient.CallContract(ctx, call, txnReceiptDB.EVMReceipt.BlockNumber)
 	if rpcError == nil {
-		return nil, fmt.Errorf("error fetching revert reason %v: %v", txnReceiptDB.TxHash, err)
+		return nil, fmt.Errorf("error fetching revert reason %v: %w", txnReceiptDB.TxHash, err)
 	}
 	revertErr, err := evmclient.ExtractRPCError(rpcError)
 	lsn.l.Infow("InsufficientBalRevertedTxn",
@@ -509,7 +505,7 @@ func (lsn *listenerV2) filterSingleRevertedTxn(ctx context.Context,
 		"ParsingErr", err,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("reverted_txn_reason_parse_err: %v", err)
+		return nil, fmt.Errorf("reverted_txn_reason_parse_err: %w", err)
 	}
 	revertErrDataStr := ""
 	revertErrDataBytes := []byte{}
@@ -539,7 +535,7 @@ func (lsn *listenerV2) filterSingleRevertedTxn(ctx context.Context,
 	callData := txData[4:] // Remove first 4 bytes of function signature
 	unpacked, err := coordinatorV2ABI.Methods["fulfillRandomWords"].Inputs.Unpack(callData)
 	if err != nil {
-		return nil, fmt.Errorf("invalid_txn_data_for_tx_pack: %s, err %v", tx.Hash().String(), err)
+		return nil, fmt.Errorf("invalid_txn_data_for_tx_pack: %s, err %w", tx.Hash().String(), err)
 	}
 	proof := abi.ConvertType(unpacked[0], new(vrf_coordinator_v2.VRFProof)).(*vrf_coordinator_v2.VRFProof)
 	reqCommitment := abi.ConvertType(unpacked[1], new(vrf_coordinator_v2.VRFCoordinatorV2RequestCommitment)).(*vrf_coordinator_v2.VRFCoordinatorV2RequestCommitment)
@@ -568,7 +564,7 @@ func (lsn *listenerV2) filterBatchRevertedTxn(ctx context.Context,
 	for _, proof := range *proofs {
 		payload, err := evmutils.ABIEncode(`[{"type":"bytes32"},{"type":"uint256"}]`, keyHash, proof.Seed)
 		if err != nil {
-			return nil, fmt.Errorf("ABI Encode Error: (err %v), (keyHash %v), (prood: %v)", err, keyHash, proof.Seed)
+			return nil, fmt.Errorf("ABI Encode Error: (err %w), (keyHash %v), (prood: %v)", err, keyHash, proof.Seed)
 		}
 		requestIDOfProof := common.BytesToHash(crypto.Keccak256(payload))
 		proofReqIDs = append(proofReqIDs, requestIDOfProof)

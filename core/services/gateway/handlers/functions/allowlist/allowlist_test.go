@@ -3,7 +3,6 @@ package allowlist_test
 import (
 	"context"
 	"encoding/hex"
-	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -16,12 +15,12 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	clienttest "github.com/smartcontractkit/chainlink-evm/pkg/client/clienttest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/gateway/handlers/functions/allowlist"
 	amocks "github.com/smartcontractkit/chainlink/v2/core/services/gateway/handlers/functions/allowlist/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/codec"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/types"
 )
 
@@ -37,7 +36,7 @@ func TestUpdateAndCheck(t *testing.T) {
 	t.Parallel()
 
 	t.Run("OK-with_ToS_V1.0.0", func(t *testing.T) {
-		client := mocks.NewClient(t)
+		client := clienttest.NewClient(t)
 		client.On("LatestBlockHeight", mock.Anything).Return(big.NewInt(42), nil)
 
 		addr := common.HexToAddress("0x0000000000000000000000000000000000000020")
@@ -61,7 +60,7 @@ func TestUpdateAndCheck(t *testing.T) {
 		orm.On("PurgeAllowedSenders", mock.Anything).Times(1).Return(nil)
 		orm.On("CreateAllowedSenders", mock.Anything, []common.Address{common.HexToAddress(addr1), common.HexToAddress(addr2)}).Times(1).Return(nil)
 
-		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.TestLogger(t))
+		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.Test(t))
 		require.NoError(t, err)
 
 		err = allowlist.Start(testutils.Context(t))
@@ -78,7 +77,7 @@ func TestUpdateAndCheck(t *testing.T) {
 	})
 
 	t.Run("OK-with_ToS_V1.1.0", func(t *testing.T) {
-		client := mocks.NewClient(t)
+		client := clienttest.NewClient(t)
 		client.On("LatestBlockHeight", mock.Anything).Return(big.NewInt(42), nil)
 
 		typeAndVersionResponse, err := encodeTypeAndVersionResponse(ToSContractV110)
@@ -102,7 +101,7 @@ func TestUpdateAndCheck(t *testing.T) {
 		orm.On("DeleteAllowedSenders", mock.Anything, []common.Address{common.HexToAddress(addr1), common.HexToAddress(addr2)}).Times(1).Return(nil)
 		orm.On("CreateAllowedSenders", mock.Anything, []common.Address{common.HexToAddress(addr1), common.HexToAddress(addr2)}).Times(1).Return(nil)
 
-		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.TestLogger(t))
+		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.Test(t))
 		require.NoError(t, err)
 
 		err = allowlist.Start(testutils.Context(t))
@@ -122,7 +121,7 @@ func TestUpdateAndCheck(t *testing.T) {
 func TestUnsupportedVersion(t *testing.T) {
 	t.Parallel()
 
-	client := mocks.NewClient(t)
+	client := clienttest.NewClient(t)
 	config := allowlist.OnchainAllowlistConfig{
 		ContractVersion:    0,
 		ContractAddress:    common.Address{},
@@ -130,7 +129,7 @@ func TestUnsupportedVersion(t *testing.T) {
 	}
 
 	orm := amocks.NewORM(t)
-	_, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.TestLogger(t))
+	_, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.Test(t))
 	require.Error(t, err)
 }
 
@@ -139,7 +138,7 @@ func TestUpdatePeriodically(t *testing.T) {
 
 	t.Run("OK-with_ToS_V1.0.0", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(testutils.Context(t))
-		client := mocks.NewClient(t)
+		client := clienttest.NewClient(t)
 		client.On("LatestBlockHeight", mock.Anything).Return(big.NewInt(42), nil)
 
 		addr := common.HexToAddress("0x0000000000000000000000000000000000000020")
@@ -167,7 +166,7 @@ func TestUpdatePeriodically(t *testing.T) {
 		orm.On("GetAllowedSenders", mock.Anything, uint(0), uint(1000)).Return([]common.Address{}, nil)
 		orm.On("CreateAllowedSenders", mock.Anything, []common.Address{common.HexToAddress(addr1), common.HexToAddress(addr2)}).Times(1).Return(nil)
 
-		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.TestLogger(t))
+		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.Test(t))
 		require.NoError(t, err)
 
 		err = allowlist.Start(ctx)
@@ -183,7 +182,7 @@ func TestUpdatePeriodically(t *testing.T) {
 
 	t.Run("OK-with_ToS_V1.1.0", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(testutils.Context(t))
-		client := mocks.NewClient(t)
+		client := clienttest.NewClient(t)
 		client.On("LatestBlockHeight", mock.Anything).Return(big.NewInt(42), nil)
 
 		addr := common.HexToAddress("0x0000000000000000000000000000000000000020")
@@ -211,7 +210,7 @@ func TestUpdatePeriodically(t *testing.T) {
 		orm.On("GetAllowedSenders", mock.Anything, uint(0), uint(1000)).Return([]common.Address{}, nil)
 		orm.On("CreateAllowedSenders", mock.Anything, []common.Address{common.HexToAddress(addr1), common.HexToAddress(addr2)}).Times(1).Return(nil)
 
-		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.TestLogger(t))
+		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.Test(t))
 		require.NoError(t, err)
 
 		err = allowlist.Start(ctx)
@@ -231,7 +230,7 @@ func TestUpdateFromContract(t *testing.T) {
 
 	t.Run("OK-fetch_complete_list_of_allowed_senders", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(testutils.Context(t))
-		client := mocks.NewClient(t)
+		client := clienttest.NewClient(t)
 		client.On("LatestBlockHeight", mock.Anything).Return(big.NewInt(42), nil)
 
 		addr := common.HexToAddress("0x0000000000000000000000000000000000000020")
@@ -261,7 +260,7 @@ func TestUpdateFromContract(t *testing.T) {
 		orm.On("PurgeAllowedSenders", mock.Anything).Times(1).Return(nil)
 		orm.On("CreateAllowedSenders", mock.Anything, []common.Address{common.HexToAddress(addr1), common.HexToAddress(addr2)}).Times(1).Return(nil)
 
-		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.TestLogger(t))
+		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.Test(t))
 		require.NoError(t, err)
 
 		err = allowlist.UpdateFromContract(ctx)
@@ -274,7 +273,7 @@ func TestUpdateFromContract(t *testing.T) {
 
 	t.Run("OK-iterate_over_list_of_allowed_senders", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(testutils.Context(t))
-		client := mocks.NewClient(t)
+		client := clienttest.NewClient(t)
 		client.On("LatestBlockHeight", mock.Anything).Return(big.NewInt(42), nil)
 
 		addr := common.HexToAddress("0x0000000000000000000000000000000000000020")
@@ -304,7 +303,7 @@ func TestUpdateFromContract(t *testing.T) {
 		orm.On("DeleteAllowedSenders", mock.Anything, []common.Address{common.HexToAddress(addr1), common.HexToAddress(addr2)}).Times(2).Return(nil)
 		orm.On("CreateAllowedSenders", mock.Anything, []common.Address{common.HexToAddress(addr1), common.HexToAddress(addr2)}).Times(2).Return(nil)
 
-		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.TestLogger(t))
+		allowlist, err := allowlist.NewOnchainAllowlist(client, config, orm, logger.Test(t))
 		require.NoError(t, err)
 
 		err = allowlist.UpdateFromContract(ctx)
@@ -314,11 +313,9 @@ func TestUpdateFromContract(t *testing.T) {
 			return allowlist.Allow(common.HexToAddress(addr1)) && !allowlist.Allow(common.HexToAddress(addr3))
 		}, testutils.WaitTimeout(t), time.Second).Should(gomega.BeTrue())
 	})
-
 }
 
 func TestExtractContractVersion(t *testing.T) {
-
 	type tc struct {
 		name           string
 		versionStr     string
@@ -327,7 +324,7 @@ func TestExtractContractVersion(t *testing.T) {
 	}
 
 	var errInvalidVersion = func(v string) *string {
-		ev := fmt.Sprintf("version not found in string: %s", v)
+		ev := "version not found in string: " + v
 		return &ev
 	}
 
@@ -378,7 +375,7 @@ func encodeTypeAndVersionResponse(typeAndVersion string) ([]byte, error) {
 	codecConfig := types.CodecConfig{Configs: map[string]types.ChainCodecConfig{
 		codecName: {TypeABI: evmEncoderConfig},
 	}}
-	encoder, err := evm.NewCodec(codecConfig)
+	encoder, err := codec.NewCodec(codecConfig)
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,7 @@
 package pipeline_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
+	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
+
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
@@ -30,7 +33,7 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline/internal/eautils"
+	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline/eautils"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
@@ -112,6 +115,18 @@ func mustReadFile(t testing.TB, file string) string {
 	content, err := os.ReadFile(file)
 	require.NoError(t, err)
 	return string(content)
+}
+
+// NewMockHandler returns an http.HandlerFunc that responds with the given payload for any request
+func NewMockHandler(payload string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, err := w.Write([]byte(payload))
+		if err != nil {
+			http.Error(w, "Failed to write response", http.StatusInternalServerError)
+		}
+	}
 }
 
 func fakePriceResponder(t *testing.T, requestData map[string]interface{}, result decimal.Decimal, inputKey string, expectedInput interface{}) http.Handler {
@@ -199,6 +214,8 @@ func TestBridgeTask_Happy(t *testing.T) {
 
 	db := pgtest.NewSqlxDB(t)
 	cfg := configtest.NewTestGeneralConfig(t)
+	telemCh := make(chan interface{}, 1)
+	ctx := pipeline.WithTelemetryCh(testutils.Context(t), telemCh)
 
 	s1 := httptest.NewServer(fakePriceResponder(t, utils.MustUnmarshalToMap(btcUSDPairing), decimal.NewFromInt(9700), "", nil))
 	defer s1.Close()
@@ -216,11 +233,11 @@ func TestBridgeTask_Happy(t *testing.T) {
 	}
 	c := clhttptest.NewTestLocalOnlyHTTPClient()
 	trORM := pipeline.NewORM(db, logger.TestLogger(t), cfg.JobPipeline().MaxSuccessfulRuns())
-	specID, err := trORM.CreateSpec(testutils.Context(t), pipeline.Pipeline{}, *models.NewInterval(5 * time.Minute))
+	specID, err := trORM.CreateSpec(ctx, pipeline.Pipeline{}, *models.NewInterval(5 * time.Minute))
 	require.NoError(t, err)
 	task.HelperSetDependencies(cfg.JobPipeline(), cfg.WebServer(), orm, specID, uuid.UUID{}, c)
 
-	result, runInfo := task.Run(testutils.Context(t), logger.TestLogger(t), pipeline.NewVarsFrom(nil), nil)
+	result, runInfo := task.Run(ctx, logger.TestLogger(t), pipeline.NewVarsFrom(nil), nil)
 	assert.False(t, runInfo.IsPending)
 	assert.False(t, runInfo.IsRetryable)
 	require.NoError(t, result.Error)
@@ -233,6 +250,22 @@ func TestBridgeTask_Happy(t *testing.T) {
 	err = json.Unmarshal([]byte(result.Value.(string)), &x)
 	require.NoError(t, err)
 	require.Equal(t, decimal.NewFromInt(9700), x.Data.Result)
+
+	telem := <-telemCh
+	require.IsType(t, &pipeline.BridgeTelemetry{}, telem)
+	btelem := telem.(*pipeline.BridgeTelemetry)
+	assert.Equal(t, string(bridge.Name), btelem.Name)
+	assert.Equal(t, btcUSDPairing, string(btelem.RequestData))
+	assert.Equal(t, `{"errorMessage":null,"error":null,"statusCode":null,"providerStatusCode":null,"data":{"result":"9700"}}
+`, string(btelem.ResponseData))
+	assert.Nil(t, btelem.ResponseError)
+	assert.NotZero(t, btelem.RequestStartTimestamp)
+	assert.NotZero(t, btelem.RequestFinishTimestamp)
+	assert.Equal(t, 200, btelem.ResponseStatusCode)
+	assert.False(t, btelem.LocalCacheHit)
+	assert.Equal(t, specID, btelem.SpecID)
+	assert.NotEqual(t, uuid.Nil, btelem.StreamID)
+	assert.NotEqual(t, uuid.Nil, btelem.DotID)
 }
 
 func TestBridgeTask_HandlesIntermittentFailure(t *testing.T) {
@@ -388,58 +421,6 @@ func TestBridgeTask_DoesNotReturnStaleResults(t *testing.T) {
 
 	require.Error(t, result2.Error)
 	require.Nil(t, result2.Value)
-
-	task2 := pipeline.BridgeTask{
-		BaseTask:    pipeline.NewBaseTask(0, "bridge2", nil, nil, 0),
-		Name:        bridge.Name.String(),
-		RequestData: btcUSDPairing,
-		CacheTTL:    "35m", // more than the stalenessCap 30m
-	}
-	task2.HelperSetDependencies(cfg2.JobPipeline(), cfg2.WebServer(), orm, specID, uuid.UUID{}, c)
-
-	// Insert entry 32m in the past, under cacheTTL of 35m but more than stalenessCap of 30m.
-	_, err = db.ExecContext(ctx, `INSERT INTO bridge_last_value(dot_id, spec_id, value, finished_at)
-		VALUES($1, $2, $3, $4) ON CONFLICT ON CONSTRAINT bridge_last_value_pkey
-		DO UPDATE SET value = $3, finished_at = $4;`, task2.DotID(), specID, big.NewInt(9700).Bytes(), time.Now().Add(-32*time.Minute))
-	require.NoError(t, err)
-
-	// Run fails even though cacheTTL > lastvalue.finished_at because cacheTTL exceeds stalenessCap.
-	result2, _ = task2.Run(testutils.Context(t), logger.TestLogger(t),
-		pipeline.NewVarsFrom(
-			map[string]interface{}{
-				"jobRun": map[string]interface{}{
-					"meta": map[string]interface{}{
-						"shouldFail": true,
-					},
-				},
-			},
-		),
-		nil)
-
-	require.Error(t, result2.Error)
-	require.Nil(t, result2.Value)
-
-	// Insert entry 25m in the past, under stalenessCap
-	_, err = db.ExecContext(ctx, `INSERT INTO bridge_last_value(dot_id, spec_id, value, finished_at)
-		VALUES($1, $2, $3, $4) ON CONFLICT ON CONSTRAINT bridge_last_value_pkey
-		DO UPDATE SET value = $3, finished_at = $4;`, task2.DotID(), specID, big.NewInt(9700).Bytes(), time.Now().Add(-25*time.Minute))
-	require.NoError(t, err)
-
-	// Run succeeds using the cached value that's under stalenessCap.
-	result2, _ = task2.Run(testutils.Context(t), logger.TestLogger(t),
-		pipeline.NewVarsFrom(
-			map[string]interface{}{
-				"jobRun": map[string]interface{}{
-					"meta": map[string]interface{}{
-						"shouldFail": true,
-					},
-				},
-			},
-		),
-		nil)
-
-	require.NoError(t, result2.Error)
-	require.Equal(t, string(big.NewInt(9700).Bytes()), result2.Value)
 }
 
 func TestBridgeTask_AsyncJobPendingState(t *testing.T) {
@@ -464,7 +445,6 @@ func TestBridgeTask_AsyncJobPendingState(t *testing.T) {
 		// w.Header().Set("X-Chainlink-Pending", "true")
 		response := map[string]interface{}{"pending": true}
 		require.NoError(t, json.NewEncoder(w).Encode(response))
-
 	})
 
 	server := httptest.NewServer(handler)
@@ -672,7 +652,6 @@ func TestBridgeTask_Variables(t *testing.T) {
 				if test.expectedErrorContains != "" {
 					require.Contains(t, result.Error.Error(), test.expectedErrorContains)
 				}
-
 			} else {
 				require.NoError(t, result.Error)
 				require.NotNil(t, result.Value)
@@ -735,7 +714,7 @@ func TestBridgeTask_Meta(t *testing.T) {
 
 	mp := map[string]interface{}{"meta": metaDataForBridge}
 	res, _ := task.Run(testutils.Context(t), logger.TestLogger(t), pipeline.NewVarsFrom(map[string]interface{}{"jobRun": mp}), nil)
-	assert.Nil(t, res.Error)
+	assert.NoError(t, res.Error)
 
 	assert.True(t, httpCalled.Load())
 }
@@ -942,7 +921,6 @@ func TestAdapterResponse_UnmarshalJSON_Happy(t *testing.T) {
 }
 
 func TestBridgeTask_Headers(t *testing.T) {
-
 	db := pgtest.NewSqlxDB(t)
 	cfg := configtest.NewTestGeneralConfig(t)
 
@@ -983,7 +961,6 @@ func TestBridgeTask_Headers(t *testing.T) {
 	standardHeaders := []string{"Content-Length", "38", "Content-Type", "application/json", "User-Agent", "Go-http-client/1.1"}
 
 	t.Run("sends headers", func(t *testing.T) {
-
 		task := pipeline.BridgeTask{
 			BaseTask:    pipeline.NewBaseTask(0, "bridge", nil, nil, 0),
 			Name:        bridge.Name.String(),
@@ -1000,7 +977,7 @@ func TestBridgeTask_Headers(t *testing.T) {
 		result, runInfo := task.Run(testutils.Context(t), logger.TestLogger(t), pipeline.NewVarsFrom(nil), nil)
 		assert.False(t, runInfo.IsPending)
 		assert.Equal(t, `{"fooresponse": 1}`, result.Value)
-		assert.Nil(t, result.Error)
+		assert.NoError(t, result.Error)
 
 		assert.Equal(t, append(standardHeaders, "X-Header-1", "foo", "X-Header-2", "bar"), allHeaders(headers))
 	})
@@ -1021,13 +998,12 @@ func TestBridgeTask_Headers(t *testing.T) {
 
 		result, runInfo := task.Run(testutils.Context(t), logger.TestLogger(t), pipeline.NewVarsFrom(nil), nil)
 		assert.False(t, runInfo.IsPending)
-		assert.NotNil(t, result.Error)
+		assert.Error(t, result.Error)
 		assert.Equal(t, `headers must have an even number of elements`, result.Error.Error())
 		assert.Nil(t, result.Value)
 	})
 
 	t.Run("allows to override content-type", func(t *testing.T) {
-
 		task := pipeline.BridgeTask{
 			BaseTask:    pipeline.NewBaseTask(0, "bridge", nil, nil, 0),
 			Name:        bridge.Name.String(),
@@ -1044,7 +1020,7 @@ func TestBridgeTask_Headers(t *testing.T) {
 		result, runInfo := task.Run(testutils.Context(t), logger.TestLogger(t), pipeline.NewVarsFrom(nil), nil)
 		assert.False(t, runInfo.IsPending)
 		assert.Equal(t, `{"fooresponse": 1}`, result.Value)
-		assert.Nil(t, result.Error)
+		assert.NoError(t, result.Error)
 
 		assert.Equal(t, []string{"Content-Length", "38", "Content-Type", "footype", "User-Agent", "Go-http-client/1.1", "X-Header-1", "foo", "X-Header-2", "bar"}, allHeaders(headers))
 	})
@@ -1067,6 +1043,107 @@ func TestBridgeTask_AdapterResponseStatusFailure(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			err := json.NewEncoder(w).Encode(testAdapterResponse)
 			require.NoError(t, err)
+		}))
+	defer s1.Close()
+
+	feedURL, err := url.ParseRequestURI(s1.URL)
+	require.NoError(t, err)
+
+	// orm := bridges.NewORM(db)
+	orm := bridges.NewCache(bridges.NewORM(db), logger.TestLogger(t), bridges.DefaultUpsertInterval)
+
+	servicetest.Run(t, orm)
+
+	_, bridge := cltest.MustCreateBridge(t, db, cltest.BridgeOpts{URL: feedURL.String()})
+
+	task := pipeline.BridgeTask{
+		BaseTask:    pipeline.NewBaseTask(0, "bridge", nil, nil, 0),
+		Name:        bridge.Name.String(),
+		RequestData: btcUSDPairing,
+	}
+	c := clhttptest.NewTestLocalOnlyHTTPClient()
+	trORM := pipeline.NewORM(db, logger.TestLogger(t), cfg.JobPipeline().MaxSuccessfulRuns())
+	specID, err := trORM.CreateSpec(ctx, pipeline.Pipeline{}, *models.NewInterval(5 * time.Minute))
+	require.NoError(t, err)
+	task.HelperSetDependencies(cfg.JobPipeline(), cfg.WebServer(), orm, specID, uuid.UUID{}, c)
+
+	vars := pipeline.NewVarsFrom(
+		map[string]interface{}{
+			"jobRun": map[string]interface{}{
+				"meta": map[string]interface{}{
+					"shouldFail": true,
+				},
+			},
+		},
+	)
+
+	testAdapterResponse.SetStatusCode(http.StatusInternalServerError)
+	testAdapterResponse.Error = map[string]interface{}{
+		"name":    "AdapterLWBAError",
+		"message": "bid ask violation detected",
+	}
+	result, runInfo := task.Run(ctx, logger.TestLogger(t), vars, nil)
+
+	require.ErrorContains(t, result.Error, "AdapterLWBAError: bid ask violation detected")
+	require.Nil(t, result.Value)
+	require.True(t, runInfo.IsRetryable)
+	require.False(t, runInfo.IsPending)
+
+	// Insert entry 1m in the past, stale value, should not be used in case of EA failure.
+	_, err = db.ExecContext(ctx, `INSERT INTO bridge_last_value(dot_id, spec_id, value, finished_at)
+	VALUES($1, $2, $3, $4) ON CONFLICT ON CONSTRAINT bridge_last_value_pkey
+	DO UPDATE SET value = $3, finished_at = $4;`, task.DotID(), specID, big.NewInt(9700).Bytes(), time.Now())
+	require.NoError(t, err)
+
+	// expect all external adapter response status failures to be served from the cache
+	testAdapterResponse.SetStatusCode(http.StatusBadRequest)
+	result, runInfo = task.Run(ctx, logger.TestLogger(t), vars, nil)
+
+	require.NoError(t, result.Error)
+	require.NotNil(t, result.Value)
+	require.False(t, runInfo.IsRetryable)
+	require.False(t, runInfo.IsPending)
+
+	testAdapterResponse.SetStatusCode(http.StatusOK)
+	testAdapterResponse.SetProviderStatusCode(http.StatusBadRequest)
+	result, runInfo = task.Run(ctx, logger.TestLogger(t), vars, nil)
+
+	require.NoError(t, result.Error)
+	require.NotNil(t, result.Value)
+	require.False(t, runInfo.IsRetryable)
+	require.False(t, runInfo.IsPending)
+
+	testAdapterResponse.SetStatusCode(http.StatusOK)
+	testAdapterResponse.SetProviderStatusCode(http.StatusOK)
+	testAdapterResponse.SetError("some error")
+	result, runInfo = task.Run(ctx, logger.TestLogger(t), vars, nil)
+
+	require.NoError(t, result.Error)
+	require.NotNil(t, result.Value)
+	require.False(t, runInfo.IsRetryable)
+	require.False(t, runInfo.IsPending)
+
+	testAdapterResponse.SetStatusCode(http.StatusInternalServerError)
+	result, runInfo = task.Run(ctx, logger.TestLogger(t), vars, nil)
+
+	require.NoError(t, result.Error)
+	require.NotNil(t, result.Value)
+	require.False(t, runInfo.IsRetryable)
+	require.False(t, runInfo.IsPending)
+}
+
+func TestBridgeTask_AdapterTimeout(t *testing.T) {
+	t.Parallel()
+	ctx := testutils.Context(t)
+
+	db := pgtest.NewSqlxDB(t)
+	cfg := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
+		c.WebServer.BridgeCacheTTL = commonconfig.MustNewDuration(1 * time.Minute)
+	})
+
+	s1 := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(time.Second) // delay enough to time-out
 		}))
 	defer s1.Close()
 
@@ -1103,39 +1180,69 @@ func TestBridgeTask_AdapterResponseStatusFailure(t *testing.T) {
 		},
 	)
 
-	// expect all external adapter response status failures to be served from the cache
-	testAdapterResponse.SetStatusCode(http.StatusBadRequest)
-	result, runInfo := task.Run(ctx, logger.TestLogger(t), vars, nil)
+	t.Run("pre-cancelled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(testutils.Context(t))
+		cancel() // pre-cancelled
+		result, runInfo := task.Run(ctx, logger.TestLogger(t), vars, nil)
 
-	require.NoError(t, result.Error)
-	require.NotNil(t, result.Value)
-	require.False(t, runInfo.IsRetryable)
-	require.False(t, runInfo.IsPending)
+		require.NoError(t, result.Error)
+		require.NotNil(t, result.Value)
+		require.False(t, runInfo.IsRetryable)
+		require.False(t, runInfo.IsPending)
+	})
 
-	testAdapterResponse.SetStatusCode(http.StatusOK)
-	testAdapterResponse.SetProviderStatusCode(http.StatusBadRequest)
-	result, runInfo = task.Run(ctx, logger.TestLogger(t), vars, nil)
+	t.Run("short", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(testutils.Context(t), time.Millisecond)
+		t.Cleanup(cancel)
+		result, runInfo := task.Run(ctx, logger.TestLogger(t), vars, nil)
 
-	require.NoError(t, result.Error)
-	require.NotNil(t, result.Value)
-	require.False(t, runInfo.IsRetryable)
-	require.False(t, runInfo.IsPending)
+		require.NoError(t, result.Error)
+		require.NotNil(t, result.Value)
+		require.False(t, runInfo.IsRetryable)
+		require.False(t, runInfo.IsPending)
+	})
+}
 
-	testAdapterResponse.SetStatusCode(http.StatusOK)
-	testAdapterResponse.SetProviderStatusCode(http.StatusOK)
-	testAdapterResponse.SetError("some error")
-	result, runInfo = task.Run(ctx, logger.TestLogger(t), vars, nil)
+func TestBridgeTask_PipelineAdapterLWBAError(t *testing.T) {
+	t.Parallel()
 
-	require.NoError(t, result.Error)
-	require.NotNil(t, result.Value)
-	require.False(t, runInfo.IsRetryable)
-	require.False(t, runInfo.IsPending)
+	dag := `
+ds [type=bridge name="adapter-error-bridge" timeout="50ms" requestData="{\"data\":{\"from\":\"ETH\",\"to\":\"USD\"}}"];
+`
 
-	testAdapterResponse.SetStatusCode(http.StatusInternalServerError)
-	result, runInfo = task.Run(ctx, logger.TestLogger(t), vars, nil)
+	ctx := testutils.Context(t)
+	db := pgtest.NewSqlxDB(t)
+	cfg := configtest.NewTestGeneralConfig(t)
+	orm := bridges.NewORM(db)
+	r, _ := newRunner(t, db, orm, cfg)
 
-	require.NoError(t, result.Error)
-	require.NotNil(t, result.Value)
-	require.False(t, runInfo.IsRetryable)
-	require.False(t, runInfo.IsPending)
+	bridge := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+		b, herr := io.ReadAll(req.Body)
+		require.NoError(t, herr)
+		require.JSONEq(t, `{"data":{"from":"ETH","to":"USD"}}`, string(b))
+
+		res.WriteHeader(http.StatusInternalServerError)
+		resp := `{"error": {"name":"AdapterLWBAError", "message": "bid ask violation detected"}}`
+		_, herr = res.Write([]byte(resp))
+		require.NoError(t, herr)
+	}))
+	t.Cleanup(bridge.Close)
+	u, _ := url.Parse(bridge.URL)
+	require.NoError(t, orm.CreateBridgeType(ctx, &bridges.BridgeType{
+		Name: "adapter-error-bridge",
+		URL:  models.WebURL(*u),
+	}))
+
+	spec := pipeline.Spec{DotDagSource: dag}
+	vars := pipeline.NewVarsFrom(nil)
+
+	_, trrs, err := r.ExecuteRun(ctx, spec, vars)
+
+	require.NoError(t, err)
+	require.Len(t, trrs, 1)
+
+	finalResult := trrs[0]
+
+	require.ErrorContains(t, finalResult.Result.Error, "AdapterLWBAError: bid ask violation detected")
+	require.Nil(t, finalResult.Result.Value)
 }

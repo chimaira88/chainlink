@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
+	"github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
 )
 
 // Row represents a data row persisted by ORM.
@@ -27,8 +27,6 @@ type SnapshotRow struct {
 	Confirmed   bool
 	PayloadSize uint64
 }
-
-//go:generate mockery --quiet --name ORM --output ./mocks/ --case=underscore
 
 // ORM represents S4 persistence layer.
 // All functions are thread-safe.

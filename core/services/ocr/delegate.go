@@ -2,6 +2,7 @@ package ocr
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,15 +15,14 @@ import (
 	ocr "github.com/smartcontractkit/libocr/offchainreporting"
 	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting/types"
 
-	commonlogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox"
-
-	txmgrcommon "github.com/smartcontractkit/chainlink/v2/common/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/offchain_aggregator_wrapper"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/offchain_aggregator_wrapper"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/keys"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	"github.com/smartcontractkit/chainlink-evm/pkg/types"
+	txmgrcommon "github.com/smartcontractkit/chainlink-framework/chains/txmgr"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
@@ -36,7 +36,8 @@ import (
 type Delegate struct {
 	ds                    sqlutil.DataSource
 	jobORM                job.ORM
-	keyStore              keystore.Master
+	ethKeyStore           keystore.Eth
+	ocrKeyStore           keystore.OCR
 	pipelineRunner        pipeline.Runner
 	peerWrapper           *ocrcommon.SingletonPeerWrapper
 	monitoringEndpointGen telemetry.MonitoringEndpointGenerator
@@ -53,7 +54,8 @@ const ConfigOverriderPollInterval = 30 * time.Second
 func NewDelegate(
 	ds sqlutil.DataSource,
 	jobORM job.ORM,
-	keyStore keystore.Master,
+	ethKeyStore keystore.Eth,
+	ocrKeyStore keystore.OCR,
 	pipelineRunner pipeline.Runner,
 	peerWrapper *ocrcommon.SingletonPeerWrapper,
 	monitoringEndpointGen telemetry.MonitoringEndpointGenerator,
@@ -65,7 +67,8 @@ func NewDelegate(
 	return &Delegate{
 		ds:                    ds,
 		jobORM:                jobORM,
-		keyStore:              keyStore,
+		ethKeyStore:           ethKeyStore,
+		ocrKeyStore:           ocrKeyStore,
 		pipelineRunner:        pipelineRunner,
 		peerWrapper:           peerWrapper,
 		monitoringEndpointGen: monitoringEndpointGen,
@@ -90,9 +93,13 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) (services []
 	if jb.OCROracleSpec == nil {
 		return nil, errors.Errorf("offchainreporting.Delegate expects an *job.OffchainreportingOracleSpec to be present, got %v", jb)
 	}
-	chain, err := d.legacyChains.Get(jb.OCROracleSpec.EVMChainID.String())
+	chainService, err := d.legacyChains.Get(jb.OCROracleSpec.EVMChainID.String())
 	if err != nil {
 		return nil, err
+	}
+	chain, ok := chainService.(legacyevm.Chain)
+	if !ok {
+		return nil, fmt.Errorf("ocr is not available in LOOP Plugin mode: %w", stderrors.ErrUnsupported)
 	}
 	concreteSpec, err := job.LoadConfigVarsOCR(chain.Config().EVM().OCR(), d.cfg.OCR(), *jb.OCROracleSpec)
 	if err != nil {
@@ -155,9 +162,10 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) (services []
 		v2Bootstrappers = peerWrapper.P2PConfig().V2().DefaultBootstrappers()
 	}
 
-	ocrLogger := commonlogger.NewOCRWrapper(lggr, d.cfg.OCR().TraceLogging(), func(msg string) {
+	ocrLogger := ocrcommon.NewOCRWrapper(lggr, d.cfg.OCR().TraceLogging(), func(ctx context.Context, msg string) {
 		d.jobORM.TryRecordError(ctx, jb.ID, msg)
 	})
+	services = append(services, ocrLogger)
 
 	lc := toLocalConfig(chain.Config().EVM(), chain.Config().EVM().OCR(), d.cfg.Insecure(), *concreteSpec, d.cfg.OCR())
 	if err = ocr.SanityCheckLocalConfig(lc); err != nil {
@@ -186,7 +194,7 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) (services []
 			return nil, errors.New("Need at least one v2 bootstrap peer defined")
 		}
 
-		ocrkey, err := d.keyStore.OCR().Get(concreteSpec.EncryptedOCRKeyBundleID.String())
+		ocrkey, err := d.ocrKeyStore.Get(concreteSpec.EncryptedOCRKeyBundleID.String())
 		if err != nil {
 			return nil, err
 		}
@@ -216,13 +224,16 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) (services []
 		// In the case of forwarding, the transmitter address is the forwarder contract deployed onchain between EOA and OCR contract.
 		effectiveTransmitterAddress := concreteSpec.TransmitterAddress.Address()
 		if jb.ForwardingAllowed {
-			fwdrAddress, fwderr := chain.TxManager().GetForwarderForEOA(effectiveTransmitterAddress)
+			fwdrAddress, fwderr := chain.TxManager().GetForwarderForEOA(ctx, effectiveTransmitterAddress)
 			if fwderr == nil {
 				effectiveTransmitterAddress = fwdrAddress
 			} else {
 				lggr.Warnw("Skipping forwarding for job, will fallback to default behavior", "job", jb.Name, "err", fwderr)
 			}
 		}
+
+		cid := chain.ID()
+		ks := keys.NewChainStore(keystore.NewEthSigner(d.ethKeyStore, cid), cid)
 
 		transmitter, err := ocrcommon.NewTransmitter(
 			chain.TxManager(),
@@ -231,8 +242,7 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) (services []
 			effectiveTransmitterAddress,
 			strategy,
 			checker,
-			chain.ID(),
-			d.keyStore.Eth(),
+			ks,
 		)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to create transmitter")

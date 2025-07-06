@@ -4,7 +4,13 @@ import (
 	"math/rand"
 
 	"github.com/rs/zerolog"
-	"github.com/smartcontractkit/wasp"
+	"golang.org/x/exp/constraints"
+
+	"github.com/smartcontractkit/chainlink-testing-framework/wasp"
+
+	"github.com/smartcontractkit/chainlink-testing-framework/seth"
+
+	seth_utils "github.com/smartcontractkit/chainlink-testing-framework/lib/utils/seth"
 
 	vrfcommon "github.com/smartcontractkit/chainlink/integration-tests/actions/vrf/common"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions/vrf/vrfv2"
@@ -17,6 +23,7 @@ type BHSTestGun struct {
 	keyHash    [32]byte
 	testConfig *vrfv2_config.Config
 	logger     zerolog.Logger
+	sethClient *seth.Client
 }
 
 func NewBHSTestGun(
@@ -25,6 +32,7 @@ func NewBHSTestGun(
 	subIDs []uint64,
 	testConfig *vrfv2_config.Config,
 	logger zerolog.Logger,
+	sethClient *seth.Client,
 ) *BHSTestGun {
 	return &BHSTestGun{
 		contracts:  contracts,
@@ -32,6 +40,7 @@ func NewBHSTestGun(
 		keyHash:    keyHash,
 		testConfig: testConfig,
 		logger:     logger,
+		sethClient: sethClient,
 	}
 }
 
@@ -48,8 +57,9 @@ func (m *BHSTestGun) Call(_ *wasp.Generator) *wasp.Response {
 		*m.testConfig.General.NumberOfWords,
 		*m.testConfig.General.RandomnessRequestCountPerRequest,
 		*m.testConfig.General.RandomnessRequestCountPerRequestDeviation,
+		seth_utils.AvailableSethKeyNum(m.sethClient),
 	)
-	//todo - might need to store randRequestBlockNumber and blockhash to verify that it was stored in BHS contract at the end of the test
+	// todo - might need to store randRequestBlockNumber and blockhash to verify that it was stored in BHS contract at the end of the test
 	if err != nil {
 		return &wasp.Response{Error: err.Error(), Failed: true}
 	}
@@ -62,6 +72,7 @@ type SingleHashGun struct {
 	subIDs     []uint64
 	testConfig *vrfv2_config.Config
 	logger     zerolog.Logger
+	sethClient *seth.Client
 }
 
 func NewSingleHashGun(
@@ -70,6 +81,7 @@ func NewSingleHashGun(
 	subIDs []uint64,
 	testConfig *vrfv2_config.Config,
 	logger zerolog.Logger,
+	sethClient *seth.Client,
 ) *SingleHashGun {
 	return &SingleHashGun{
 		contracts:  contracts,
@@ -77,22 +89,23 @@ func NewSingleHashGun(
 		subIDs:     subIDs,
 		testConfig: testConfig,
 		logger:     logger,
+		sethClient: sethClient,
 	}
 }
 
 // Call implements example gun call, assertions on response bodies should be done here
 func (m *SingleHashGun) Call(_ *wasp.Generator) *wasp.Response {
-	//todo - should work with multiple consumers and consumers having different keyhashes and wallets
+	// todo - should work with multiple consumers and consumers having different keyhashes and wallets
 
 	vrfv2Config := m.testConfig.General
-	//randomly increase/decrease randomness request count per TX
+	// randomly increase/decrease randomness request count per TX
 	randomnessRequestCountPerRequest := deviateValue(*vrfv2Config.RandomnessRequestCountPerRequest, *vrfv2Config.RandomnessRequestCountPerRequestDeviation)
 	_, _, err := vrfv2.RequestRandomnessAndWaitForFulfillment(
 		m.logger,
-		//the same consumer is used for all requests and in all subs
+		// the same consumer is used for all requests and in all subs
 		m.contracts.VRFV2Consumers[0],
 		m.contracts.CoordinatorV2,
-		//randomly pick a subID from pool of subIDs
+		// randomly pick a subID from pool of subIDs
 		m.subIDs[randInRange(0, len(m.subIDs)-1)],
 		&vrfcommon.VRFKeyData{KeyHash: m.keyHash},
 		*vrfv2Config.MinimumConfirmations,
@@ -101,6 +114,7 @@ func (m *SingleHashGun) Call(_ *wasp.Generator) *wasp.Response {
 		randomnessRequestCountPerRequest,
 		*vrfv2Config.RandomnessRequestCountPerRequestDeviation,
 		vrfv2Config.RandomWordsFulfilledEventTimeout.Duration,
+		seth_utils.AvailableSethKeyNum(m.sethClient),
 	)
 	if err != nil {
 		return &wasp.Response{Error: err.Error(), Failed: true}
@@ -110,9 +124,9 @@ func (m *SingleHashGun) Call(_ *wasp.Generator) *wasp.Response {
 
 func deviateValue(requestCountPerTX uint16, deviation uint16) uint16 {
 	if randBool() && requestCountPerTX > deviation {
-		requestCountPerTX -= uint16(randInRange(0, int(deviation)))
+		requestCountPerTX -= randInRange(0, deviation)
 	} else {
-		requestCountPerTX += uint16(randInRange(0, int(deviation)))
+		requestCountPerTX += randInRange(0, deviation)
 	}
 	return requestCountPerTX
 }
@@ -120,6 +134,7 @@ func deviateValue(requestCountPerTX uint16, deviation uint16) uint16 {
 func randBool() bool {
 	return rand.Intn(2) == 1
 }
-func randInRange(min int, max int) int {
-	return rand.Intn(max-min+1) + min
+
+func randInRange[I constraints.Integer](lower, upper I) I {
+	return I(rand.Intn(int(upper-lower)+1)) + lower
 }

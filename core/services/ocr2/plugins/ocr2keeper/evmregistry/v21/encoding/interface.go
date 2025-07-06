@@ -5,8 +5,8 @@ import (
 
 	ocr2keepers "github.com/smartcontractkit/chainlink-common/pkg/types/automation"
 
-	ac "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/automation_compatible_utils"
-	autov2common "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/i_automation_v21_plus_common"
+	ac "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/automation_compatible_utils"
+	autov2common "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/i_automation_v21_plus_common"
 )
 
 type UpkeepFailureReason uint8
@@ -31,6 +31,7 @@ const (
 	UpkeepFailureReasonInvalidRevertDataInput  UpkeepFailureReason = 34
 	UpkeepFailureReasonSimulationFailed        UpkeepFailureReason = 35
 	UpkeepFailureReasonTxHashReorged           UpkeepFailureReason = 36
+	UpkeepFailureReasonGasPriceTooHigh         UpkeepFailureReason = 37
 
 	// pipeline execution error
 	NoPipelineError               PipelineExecutionState = 0

@@ -1,22 +1,24 @@
 package smoke
 
 import (
-	"fmt"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/smartcontractkit/chainlink/integration-tests/utils"
 
 	"github.com/google/uuid"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/chainlink-testing-framework/logging"
-	"github.com/smartcontractkit/chainlink-testing-framework/networks"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils/testcontext"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/logging"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/utils/testcontext"
+	"github.com/smartcontractkit/chainlink-testing-framework/parrot"
 
+	"github.com/smartcontractkit/chainlink/deployment/environment/nodeclient"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
-	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
 	"github.com/smartcontractkit/chainlink/integration-tests/docker/test_env"
 
@@ -27,7 +29,7 @@ func TestRunLogBasic(t *testing.T) {
 	t.Parallel()
 	l := logging.GetTestLogger(t)
 
-	config, err := tc.GetConfig("Smoke", tc.RunLog)
+	config, err := tc.GetConfig([]string{"Smoke"}, tc.RunLog)
 	require.NoError(t, err, "Error getting config")
 
 	privateNetwork, err := actions.EthereumNetworkConfigFromConfig(l, &config)
@@ -36,18 +38,26 @@ func TestRunLogBasic(t *testing.T) {
 	env, err := test_env.NewCLTestEnvBuilder().
 		WithTestInstance(t).
 		WithTestConfig(&config).
-		WithPrivateEthereumNetwork(privateNetwork).
+		WithPrivateEthereumNetwork(privateNetwork.EthereumNetworkConfig).
 		WithMockAdapter().
 		WithCLNodes(1).
-		WithFunding(big.NewFloat(.1)).
 		WithStandardCleanup().
-		WithSeth().
 		Build()
 	require.NoError(t, err)
 
-	network := networks.MustGetSelectedNetworkConfig(config.GetNetworkConfig())[0]
-	sethClient, err := env.GetSethClient(network.ChainID)
+	evmNetwork, err := env.GetFirstEvmNetwork()
+	require.NoError(t, err, "Error getting first evm network")
+
+	sethClient, err := utils.TestAwareSethClient(t, config, evmNetwork)
 	require.NoError(t, err, "Error getting seth client")
+
+	err = actions.FundChainlinkNodesFromRootAddress(l, sethClient, contracts.ChainlinkClientToChainlinkNodeWithKeysAndAddress(env.ClCluster.NodeAPIs()), big.NewFloat(*config.Common.ChainlinkNodeFunding))
+	require.NoError(t, err, "Failed to fund the nodes")
+
+	t.Cleanup(func() {
+		// ignore error, we will see failures in the logs anyway
+		_ = actions.ReturnFundsFromNodes(l, sethClient, contracts.ChainlinkClientToChainlinkNodeWithKeysAndAddress(env.ClCluster.NodeAPIs()))
+	})
 
 	lt, err := contracts.DeployLinkTokenContract(l, sethClient)
 	require.NoError(t, err, "Deploying Link Token Contract shouldn't fail")
@@ -60,30 +70,36 @@ func TestRunLogBasic(t *testing.T) {
 	err = lt.Transfer(consumer.Address(), big.NewInt(2e18))
 	require.NoError(t, err, "Transferring %d to consumer contract shouldn't fail", big.NewInt(2e18))
 
-	err = env.MockAdapter.SetAdapterBasedIntValuePath("/variable", []string{http.MethodPost}, 5)
+	route := &parrot.Route{
+		Method:             http.MethodPost,
+		Path:               "/variable",
+		ResponseBody:       5,
+		ResponseStatusCode: http.StatusOK,
+	}
+	err = env.MockAdapter.SetAdapterRoute(route)
 	require.NoError(t, err, "Setting mock adapter value path shouldn't fail")
 
 	jobUUID := uuid.New()
 
-	bta := client.BridgeTypeAttributes{
-		Name: fmt.Sprintf("five-%s", jobUUID.String()),
-		URL:  fmt.Sprintf("%s/variable", env.MockAdapter.InternalEndpoint),
+	bta := nodeclient.BridgeTypeAttributes{
+		Name: "five-" + jobUUID.String(),
+		URL:  env.MockAdapter.InternalEndpoint + "/variable",
 	}
 	err = env.ClCluster.Nodes[0].API.MustCreateBridge(&bta)
 	require.NoError(t, err, "Creating bridge shouldn't fail")
 
-	os := &client.DirectRequestTxPipelineSpec{
+	os := &nodeclient.DirectRequestTxPipelineSpec{
 		BridgeTypeAttributes: bta,
 		DataPath:             "data,result",
 	}
 	ost, err := os.String()
 	require.NoError(t, err, "Building observation source spec shouldn't fail")
 
-	_, err = env.ClCluster.Nodes[0].API.MustCreateJob(&client.DirectRequestJobSpec{
-		Name:                     fmt.Sprintf("direct-request-%s", uuid.NewString()),
+	_, err = env.ClCluster.Nodes[0].API.MustCreateJob(&nodeclient.DirectRequestJobSpec{
+		Name:                     "direct-request-" + uuid.NewString(),
 		MinIncomingConfirmations: "1",
 		ContractAddress:          oracle.Address(),
-		EVMChainID:               fmt.Sprint(sethClient.ChainID),
+		EVMChainID:               strconv.FormatInt(sethClient.ChainID, 10),
 		ExternalJobID:            jobUUID.String(),
 		ObservationSource:        ost,
 	})
@@ -96,7 +112,7 @@ func TestRunLogBasic(t *testing.T) {
 		oracle.Address(),
 		jobID,
 		big.NewInt(1e18),
-		fmt.Sprintf("%s/variable", env.MockAdapter.InternalEndpoint),
+		env.MockAdapter.InternalEndpoint+"/variable",
 		"data,result",
 		big.NewInt(100),
 	)

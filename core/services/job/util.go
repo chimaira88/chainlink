@@ -7,13 +7,13 @@ import (
 )
 
 var (
-	ErrNoChainFromSpec       = fmt.Errorf("could not get chain from spec")
-	ErrNoSendingKeysFromSpec = fmt.Errorf("could not get sending keys from spec")
+	ErrNoChainFromSpec       = errors.New("could not get chain from spec")
+	ErrNoSendingKeysFromSpec = errors.New("could not get sending keys from spec")
 )
 
 // SendingKeysForJob parses the job spec and retrieves the sending keys found.
-func SendingKeysForJob(job *Job) ([]string, error) {
-	sendingKeysInterface, ok := job.OCR2OracleSpec.RelayConfig["sendingKeys"]
+func SendingKeysForJob(spec *OCR2OracleSpec) ([]string, error) {
+	sendingKeysInterface, ok := spec.RelayConfig["sendingKeys"]
 	if !ok {
 		return nil, fmt.Errorf("%w: sendingKeys must be provided in relay config", ErrNoSendingKeysFromSpec)
 	}

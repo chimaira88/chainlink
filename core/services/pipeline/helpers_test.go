@@ -1,12 +1,13 @@
 package pipeline
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/google/uuid"
 
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
 )
 
 const (
@@ -64,4 +65,4 @@ func (t *ETHTxTask) HelperSetDependencies(legacyChains legacyevm.LegacyChainCont
 	t.jobType = jobType
 }
 
-func (o *orm) Prune(pipelineSpecID int32) { o.prune(o.ds, pipelineSpecID) }
+func (o *orm) Prune(ctx context.Context, pipelineSpecID int32) { o.prune(ctx, o.ds, pipelineSpecID) }

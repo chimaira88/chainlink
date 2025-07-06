@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind/backends"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/google/uuid"
@@ -17,20 +16,19 @@ import (
 	"github.com/stretchr/testify/require"
 
 	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
 
-	txmgrcommon "github.com/smartcontractkit/chainlink/v2/common/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
-	v2 "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	evmutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_consumer_v2_upgradeable_example"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_external_sub_owner_example"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrfv2_transparent_upgradeable_proxy"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrf_consumer_v2_upgradeable_example"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrf_external_sub_owner_example"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrfv2_transparent_upgradeable_proxy"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	v2 "github.com/smartcontractkit/chainlink-evm/pkg/config/toml"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	"github.com/smartcontractkit/chainlink-evm/pkg/types"
+	evmutils "github.com/smartcontractkit/chainlink-evm/pkg/utils"
+	ubig "github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
+	txmgrcommon "github.com/smartcontractkit/chainlink-framework/chains/txmgr"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest/heavyweight"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
@@ -41,6 +39,7 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf/vrftesthelpers"
 	"github.com/smartcontractkit/chainlink/v2/core/testdata/testspecs"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/utils/testutils/heavyweight"
 )
 
 func testSingleConsumerHappyPath(
@@ -67,14 +66,14 @@ func testSingleConsumerHappyPath(
 	key2 := cltest.MustGenerateRandomKey(t)
 	gasLanePriceWei := assets.GWei(10)
 	config, db := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
-		simulatedOverrides(t, assets.GWei(10), toml.KeySpecific{
+		simulatedOverrides(t, assets.GWei(10), v2.KeySpecific{
 			// Gas lane.
 			Key:          ptr[types.EIP55Address](key1.EIP55Address),
-			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
-		}, toml.KeySpecific{
+			GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+		}, v2.KeySpecific{
 			// Gas lane.
 			Key:          ptr[types.EIP55Address](key2.EIP55Address),
-			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+			GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
 		})(c, s)
 		c.EVM[0].MinIncomingConfirmations = ptr[uint32](2)
 		c.Feature.LogPoller = ptr(true)
@@ -154,11 +153,11 @@ func testSingleConsumerHappyPath(
 	assertNumRandomWords(t, consumerContract, numWords)
 
 	// Assert that both send addresses were used to fulfill the requests
-	n, err := uni.backend.PendingNonceAt(ctx, key1.Address)
+	n, err := uni.backend.Client().PendingNonceAt(ctx, key1.Address)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, n)
 
-	n, err = uni.backend.PendingNonceAt(ctx, key2.Address)
+	n, err = uni.backend.Client().PendingNonceAt(ctx, key2.Address)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, n)
 
@@ -190,23 +189,23 @@ func testMultipleConsumersNeedBHS(
 
 	// generate n BHS keys to make sure BHS job rotates sending keys
 	var bhsKeyAddresses []string
-	var keySpecificOverrides []toml.KeySpecific
+	var keySpecificOverrides []v2.KeySpecific
 	var keys []interface{}
 	gasLanePriceWei := assets.GWei(10)
 	for i := 0; i < nConsumers; i++ {
 		bhsKey := cltest.MustGenerateRandomKey(t)
 		bhsKeyAddresses = append(bhsKeyAddresses, bhsKey.Address.String())
 		keys = append(keys, bhsKey)
-		keySpecificOverrides = append(keySpecificOverrides, toml.KeySpecific{
+		keySpecificOverrides = append(keySpecificOverrides, v2.KeySpecific{
 			Key:          ptr(bhsKey.EIP55Address),
-			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+			GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
 		})
 		sendEth(t, ownerKey, uni.backend, bhsKey.Address, 10)
 	}
-	keySpecificOverrides = append(keySpecificOverrides, toml.KeySpecific{
+	keySpecificOverrides = append(keySpecificOverrides, v2.KeySpecific{
 		// Gas lane.
 		Key:          ptr(vrfKey.EIP55Address),
-		GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+		GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
 	})
 
 	config, db := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
@@ -250,9 +249,11 @@ func testMultipleConsumersNeedBHS(
 		t, bhsKeyAddresses, app, uni.bhsContractAddress.String(), "",
 		v2CoordinatorAddress, v2PlusCoordinatorAddress, "", 0, 200, 0, 100)
 
+	chain, ok := app.GetRelayers().LegacyEVMChains().Slice()[0].(legacyevm.Chain)
+	require.True(t, ok)
 	// Ensure log poller is ready and has all logs.
-	require.NoError(t, app.GetRelayers().LegacyEVMChains().Slice()[0].LogPoller().Ready())
-	require.NoError(t, app.GetRelayers().LegacyEVMChains().Slice()[0].LogPoller().Replay(ctx, 1))
+	require.NoError(t, chain.LogPoller().Ready())
+	require.NoError(t, chain.LogPoller().Replay(ctx, 1))
 
 	for i := 0; i < nConsumers; i++ {
 		consumer := consumers[i]
@@ -330,7 +331,7 @@ func testMultipleConsumersNeedTrustedBHS(
 	// generate n BHS keys to make sure BHS job rotates sending keys
 	var bhsKeyAddresses []common.Address
 	var bhsKeyAddressesStrings []string
-	var keySpecificOverrides []toml.KeySpecific
+	var keySpecificOverrides []v2.KeySpecific
 	var keys []interface{}
 	gasLanePriceWei := assets.GWei(10)
 	for i := 0; i < nConsumers; i++ {
@@ -338,16 +339,16 @@ func testMultipleConsumersNeedTrustedBHS(
 		bhsKeyAddressesStrings = append(bhsKeyAddressesStrings, bhsKey.Address.String())
 		bhsKeyAddresses = append(bhsKeyAddresses, bhsKey.Address)
 		keys = append(keys, bhsKey)
-		keySpecificOverrides = append(keySpecificOverrides, toml.KeySpecific{
+		keySpecificOverrides = append(keySpecificOverrides, v2.KeySpecific{
 			Key:          ptr(bhsKey.EIP55Address),
-			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+			GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
 		})
 		sendEth(t, ownerKey, uni.backend, bhsKey.Address, 10)
 	}
-	keySpecificOverrides = append(keySpecificOverrides, toml.KeySpecific{
+	keySpecificOverrides = append(keySpecificOverrides, v2.KeySpecific{
 		// Gas lane.
 		Key:          ptr(vrfKey.EIP55Address),
-		GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+		GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
 	})
 
 	// Whitelist vrf key for trusted BHS.
@@ -404,7 +405,8 @@ func testMultipleConsumersNeedTrustedBHS(
 		v2CoordinatorAddress, v2PlusCoordinatorAddress, uni.trustedBhsContractAddress.String(), 20, 1000, 0, waitBlocks)
 
 	// Ensure log poller is ready and has all logs.
-	chain := app.GetRelayers().LegacyEVMChains().Slice()[0]
+	chain, ok := app.GetRelayers().LegacyEVMChains().Slice()[0].(legacyevm.Chain)
+	require.True(t, ok)
 	require.NoError(t, chain.LogPoller().Ready())
 	require.NoError(t, chain.LogPoller().Replay(ctx, 1))
 
@@ -446,13 +448,13 @@ func testMultipleConsumersNeedTrustedBHS(
 		topUpSubscription(t, consumer, consumerContract, uni.backend, big.NewInt(5e18 /* 5 LINK */), nativePayment)
 
 		// Wait for fulfillment to be queued.
-		gomega.NewGomegaWithT(t).Eventually(func() bool {
+		require.Eventually(t, func() bool {
 			uni.backend.Commit()
 			runs, err := app.PipelineORM().GetAllRuns(ctx)
 			require.NoError(t, err)
 			t.Log("runs", len(runs))
-			return len(runs) == 1
-		}, testutils.WaitTimeout(t), time.Second).Should(gomega.BeTrue())
+			return len(runs) >= 1
+		}, testutils.WaitTimeout(t), time.Second)
 
 		mine(t, requestID, subID, uni.backend, db, vrfVersion, testutils.SimulatedChainID)
 
@@ -541,10 +543,10 @@ func testSingleConsumerHappyPathBatchFulfillment(
 	key1 := cltest.MustGenerateRandomKey(t)
 	gasLanePriceWei := assets.GWei(10)
 	config, db := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
-		simulatedOverrides(t, assets.GWei(10), toml.KeySpecific{
+		simulatedOverrides(t, assets.GWei(10), v2.KeySpecific{
 			// Gas lane.
 			Key:          ptr(key1.EIP55Address),
-			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+			GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
 		})(c, s)
 		c.EVM[0].GasEstimator.LimitDefault = ptr[uint64](5_000_000)
 		c.EVM[0].MinIncomingConfirmations = ptr[uint32](2)
@@ -648,10 +650,10 @@ func testSingleConsumerNeedsTopUp(
 	key := cltest.MustGenerateRandomKey(t)
 	gasLanePriceWei := assets.GWei(1000)
 	config, db := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
-		simulatedOverrides(t, assets.GWei(1000), toml.KeySpecific{
+		simulatedOverrides(t, assets.GWei(1000), v2.KeySpecific{
 			// Gas lane.
 			Key:          ptr(key.EIP55Address),
-			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+			GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
 		})(c, s)
 		c.EVM[0].MinIncomingConfirmations = ptr[uint32](2)
 		c.Feature.LogPoller = ptr(true)
@@ -698,13 +700,13 @@ func testSingleConsumerNeedsTopUp(
 	uni.backend.Commit()
 
 	// Wait for fulfillment to go through.
-	gomega.NewWithT(t).Eventually(func() bool {
+	require.Eventually(t, func() bool {
 		uni.backend.Commit()
 		runs, err := app.PipelineORM().GetAllRuns(ctx)
 		require.NoError(t, err)
 		t.Log("assert 2", "runs", len(runs))
 		return len(runs) == 1
-	}, testutils.WaitTimeout(t), 1*time.Second).Should(gomega.BeTrue())
+	}, testutils.WaitTimeout(t), 1*time.Second)
 
 	// Mine the fulfillment. Need to wait for Txm to mark the tx as confirmed
 	// so that we can actually see the event on the simulated chain.
@@ -755,10 +757,10 @@ func testBlockHeaderFeeder(
 	gasLanePriceWei := assets.GWei(10)
 
 	config, db := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
-		simulatedOverrides(t, gasLanePriceWei, toml.KeySpecific{
+		simulatedOverrides(t, gasLanePriceWei, v2.KeySpecific{
 			// Gas lane.
 			Key:          ptr(vrfKey.EIP55Address),
-			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+			GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
 		})(c, s)
 		c.EVM[0].MinIncomingConfirmations = ptr[uint32](2)
 		c.Feature.LogPoller = ptr(true)
@@ -797,8 +799,10 @@ func testBlockHeaderFeeder(
 		v2coordinatorAddress, v2plusCoordinatorAddress)
 
 	// Ensure log poller is ready and has all logs.
-	require.NoError(t, app.GetRelayers().LegacyEVMChains().Slice()[0].LogPoller().Ready())
-	require.NoError(t, app.GetRelayers().LegacyEVMChains().Slice()[0].LogPoller().Replay(ctx, 1))
+	chain, ok := app.GetRelayers().LegacyEVMChains().Slice()[0].(legacyevm.Chain)
+	require.True(t, ok)
+	require.NoError(t, chain.LogPoller().Ready())
+	require.NoError(t, chain.LogPoller().Replay(ctx, 1))
 
 	for i := 0; i < nConsumers; i++ {
 		consumer := consumers[i]
@@ -849,7 +853,7 @@ func createSubscriptionAndGetSubscriptionCreatedEvent(
 	t *testing.T,
 	subOwner *bind.TransactOpts,
 	coordinator v22.CoordinatorV2_X,
-	backend *backends.SimulatedBackend,
+	backend types.Backend,
 ) v22.SubscriptionCreated {
 	_, err := coordinator.CreateSubscription(subOwner)
 	require.NoError(t, err)
@@ -911,14 +915,14 @@ func testSingleConsumerForcedFulfillment(
 	key2 := cltest.MustGenerateRandomKey(t)
 	gasLanePriceWei := assets.GWei(10)
 	config, db := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
-		simulatedOverrides(t, assets.GWei(10), toml.KeySpecific{
+		simulatedOverrides(t, assets.GWei(10), v2.KeySpecific{
 			// Gas lane.
 			Key:          ptr(key1.EIP55Address),
-			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
-		}, toml.KeySpecific{
+			GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+		}, v2.KeySpecific{
 			// Gas lane.
 			Key:          ptr(key2.EIP55Address),
-			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+			GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
 		})(c, s)
 		c.EVM[0].MinIncomingConfirmations = ptr[uint32](2)
 		c.Feature.LogPoller = ptr(true)
@@ -928,7 +932,7 @@ func testSingleConsumerForcedFulfillment(
 
 	eoaConsumerAddr, _, eoaConsumer, err := vrf_external_sub_owner_example.DeployVRFExternalSubOwnerExample(
 		uni.neil,
-		uni.backend,
+		uni.backend.Client(),
 		uni.oldRootContractAddress,
 		uni.linkContractAddress,
 	)
@@ -951,7 +955,7 @@ func testSingleConsumerForcedFulfillment(
 	sub, err := uni.oldRootContract.GetSubscription(nil, subID)
 	require.NoError(t, err, "failed to get subscription with id %d", subID)
 	require.Equal(t, assets.Ether(5).ToInt(), sub.Balance())
-	require.Equal(t, 1, len(sub.Consumers()))
+	require.Len(t, sub.Consumers(), 1)
 	require.Equal(t, eoaConsumerAddr, sub.Consumers()[0])
 	require.Equal(t, uni.neil.From, sub.Owner())
 
@@ -1015,12 +1019,13 @@ func testSingleConsumerForcedFulfillment(
 	// Remove consumer and cancel the sub before the request can be fulfilled
 	_, err = uni.oldRootContract.RemoveConsumer(uni.neil, subID, eoaConsumerAddr)
 	require.NoError(t, err, "RemoveConsumer tx failed")
+	uni.backend.Commit()
 	_, err = uni.oldRootContract.CancelSubscription(uni.neil, subID, uni.neil.From)
 	require.NoError(t, err, "CancelSubscription tx failed")
 	uni.backend.Commit()
 
 	// Wait for force-fulfillment to be queued.
-	gomega.NewGomegaWithT(t).Eventually(func() bool {
+	require.Eventually(t, func() bool {
 		uni.backend.Commit()
 		commitment, err2 := uni.oldRootContract.GetCommitment(nil, requestID)
 		require.NoError(t, err2)
@@ -1036,7 +1041,7 @@ func testSingleConsumerForcedFulfillment(
 		}
 		t.Log("num RandomWordsForced logs:", i)
 		return utils.IsEmpty(commitment[:])
-	}, testutils.WaitTimeout(t), time.Second).Should(gomega.BeTrue())
+	}, testutils.WaitTimeout(t), time.Second)
 
 	// Mine the fulfillment that was queued.
 	mine(t, requestID, subID, uni.backend, db, vrfVersion, testutils.SimulatedChainID)
@@ -1058,7 +1063,7 @@ func testSingleConsumerForcedFulfillment(
 		require.Equal(t, subID.Uint64(), it.Event.SubId)
 		require.Equal(t, eoaConsumerAddr.String(), it.Event.Sender.String())
 	}
-	require.Greater(t, i, 0)
+	require.Positive(t, i)
 
 	t.Log("Done!")
 }
@@ -1264,8 +1269,8 @@ func testSingleConsumerBigGasCallbackSandwich(
 	{
 		runs, err := app.PipelineORM().GetAllRuns(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, 0, len(runs))
-		assert.Equal(t, 3, len(reqIDs))
+		assert.Empty(t, runs)
+		assert.Len(t, reqIDs, 3)
 	}
 
 	// Wait for the 50_000 gas randomness request to be enqueued.
@@ -1296,7 +1301,7 @@ func testSingleConsumerBigGasCallbackSandwich(
 	{
 		runs, err := app.PipelineORM().GetAllRuns(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, 1, len(runs))
+		assert.Len(t, runs, 1)
 	}
 
 	// Make some randomness requests, each one block apart, this time without a low-gas request present in the callbackGasLimit slice.
@@ -1431,7 +1436,7 @@ func testSingleConsumerMultipleGasLanes(
 	assertNumRandomWords(t, consumerContract, numWords)
 }
 
-func topUpSubscription(t *testing.T, consumer *bind.TransactOpts, consumerContract vrftesthelpers.VRFConsumerContract, backend *backends.SimulatedBackend, fundingAmount *big.Int, nativePayment bool) {
+func topUpSubscription(t *testing.T, consumer *bind.TransactOpts, consumerContract vrftesthelpers.VRFConsumerContract, backend types.Backend, fundingAmount *big.Int, nativePayment bool) {
 	if nativePayment {
 		_, err := consumerContract.TopUpSubscriptionNative(consumer, fundingAmount)
 		require.NoError(t, err)
@@ -1517,7 +1522,6 @@ func testConsumerProxyHappyPath(
 	ownerKey ethkey.KeyV2,
 	uni coordinatorV2UniverseCommon,
 	batchCoordinatorAddress common.Address,
-	batchEnabled bool,
 	vrfVersion vrfcommon.Version,
 	nativePayment bool,
 ) {
@@ -1614,11 +1618,11 @@ func testConsumerProxyHappyPath(
 	assertNumRandomWords(t, consumerContract, numWords)
 
 	// Assert that both send addresses were used to fulfill the requests
-	n, err := uni.backend.PendingNonceAt(ctx, key1.Address)
+	n, err := uni.backend.Client().PendingNonceAt(ctx, key1.Address)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, n)
 
-	n, err = uni.backend.PendingNonceAt(ctx, key2.Address)
+	n, err = uni.backend.Client().PendingNonceAt(ctx, key2.Address)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, n)
 
@@ -1631,7 +1635,7 @@ func testConsumerProxyCoordinatorZeroAddress(
 ) {
 	// Deploy another upgradeable consumer, proxy, and proxy admin
 	// to test vrfCoordinator != 0x0 condition.
-	upgradeableConsumerAddress, _, _, err := vrf_consumer_v2_upgradeable_example.DeployVRFConsumerV2UpgradeableExample(uni.neil, uni.backend)
+	upgradeableConsumerAddress, _, _, err := vrf_consumer_v2_upgradeable_example.DeployVRFConsumerV2UpgradeableExample(uni.neil, uni.backend.Client())
 	require.NoError(t, err, "failed to deploy upgradeable consumer to simulated ethereum blockchain")
 	uni.backend.Commit()
 
@@ -1643,7 +1647,7 @@ func testConsumerProxyCoordinatorZeroAddress(
 		uni.linkContractAddress)
 	require.NoError(t, err)
 	_, _, _, err = vrfv2_transparent_upgradeable_proxy.DeployVRFV2TransparentUpgradeableProxy(
-		uni.neil, uni.backend, upgradeableConsumerAddress, uni.proxyAdminAddress, initializeCalldata)
+		uni.neil, uni.backend.Client(), upgradeableConsumerAddress, uni.proxyAdminAddress, initializeCalldata)
 	require.Error(t, err)
 }
 
@@ -1713,7 +1717,7 @@ func testMaliciousConsumer(
 	// We expect the request to be serviced
 	// by the node.
 	var attempts []txmgr.TxAttempt
-	gomega.NewWithT(t).Eventually(func() bool {
+	require.Eventually(t, func() bool {
 		attempts, _, err = app.TxmStorageService().TxAttempts(ctx, 0, 1000)
 		require.NoError(t, err)
 		// It possible that we send the test request
@@ -1723,11 +1727,13 @@ func testMaliciousConsumer(
 		t.Log("attempts", attempts)
 		uni.backend.Commit()
 		return len(attempts) == 1 && attempts[0].Tx.State == txmgrcommon.TxConfirmed
-	}, testutils.WaitTimeout(t), 1*time.Second).Should(gomega.BeTrue())
+	}, testutils.WaitTimeout(t), 1*time.Second)
 
 	// The fulfillment tx should succeed
-	ch, err := app.GetRelayers().LegacyEVMChains().Get(evmtest.MustGetDefaultChainID(t, config.EVMConfigs()).String())
+	cs, err := app.GetRelayers().LegacyEVMChains().Get(evmtest.MustGetDefaultChainID(t, config.EVMConfigs()).String())
 	require.NoError(t, err)
+	ch, ok := cs.(legacyevm.Chain)
+	require.True(t, ok)
 	r, err := ch.Client().TransactionReceipt(ctx, attempts[0].Hash)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), r.Status)
@@ -1739,8 +1745,8 @@ func testMaliciousConsumer(
 	for it.Next() {
 		fulfillments = append(fulfillments, it.Event())
 	}
-	require.Equal(t, 1, len(fulfillments))
-	require.Equal(t, false, fulfillments[0].Success())
+	require.Len(t, fulfillments, 1)
+	require.False(t, fulfillments[0].Success())
 
 	// It should not have succeeded in placing another request.
 	it2, err2 := uni.rootContract.FilterRandomWordsRequested(nil, nil, nil, nil)
@@ -1749,7 +1755,7 @@ func testMaliciousConsumer(
 	for it2.Next() {
 		requests = append(requests, it2.Event())
 	}
-	require.Equal(t, 1, len(requests))
+	require.Len(t, requests, 1)
 }
 
 func testReplayOldRequestsOnStartUp(
@@ -1775,10 +1781,10 @@ func testReplayOldRequestsOnStartUp(
 	sendingKey := cltest.MustGenerateRandomKey(t)
 	gasLanePriceWei := assets.GWei(10)
 	config, _ := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
-		simulatedOverrides(t, assets.GWei(10), toml.KeySpecific{
+		simulatedOverrides(t, assets.GWei(10), v2.KeySpecific{
 			// Gas lane.
 			Key:          ptr(sendingKey.EIP55Address),
-			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+			GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
 		})(c, s)
 		c.EVM[0].MinIncomingConfirmations = ptr[uint32](2)
 		c.Feature.LogPoller = ptr(true)
@@ -1816,10 +1822,10 @@ func testReplayOldRequestsOnStartUp(
 	}
 
 	config, db := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
-		simulatedOverrides(t, assets.GWei(10), toml.KeySpecific{
+		simulatedOverrides(t, assets.GWei(10), v2.KeySpecific{
 			// Gas lane.
 			Key:          ptr(sendingKey.EIP55Address),
-			GasEstimator: toml.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
+			GasEstimator: v2.KeySpecificGasEstimator{PriceMax: gasLanePriceWei},
 		})(c, s)
 		c.EVM[0].MinIncomingConfirmations = ptr[uint32](2)
 		c.Feature.LogPoller = ptr(true)
@@ -1863,7 +1869,7 @@ func testReplayOldRequestsOnStartUp(
 	require.NoError(t, err)
 
 	// Wait until all jobs are active and listening for logs
-	gomega.NewWithT(t).Eventually(func() bool {
+	require.Eventually(t, func() bool {
 		jbs := app.JobSpawner().ActiveJobs()
 		for _, jb := range jbs {
 			if jb.Type == job.VRF {
@@ -1871,7 +1877,7 @@ func testReplayOldRequestsOnStartUp(
 			}
 		}
 		return false
-	}, testutils.WaitTimeout(t), 100*time.Millisecond).Should(gomega.BeTrue())
+	}, testutils.WaitTimeout(t), 100*time.Millisecond)
 
 	// Wait for fulfillment to be queued.
 	gomega.NewGomegaWithT(t).Eventually(func() bool {

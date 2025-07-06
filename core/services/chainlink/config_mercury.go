@@ -3,7 +3,6 @@ package chainlink
 import (
 	"time"
 
-	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/types"
 
 	"github.com/smartcontractkit/chainlink/v2/core/config"
@@ -42,12 +41,28 @@ type mercuryTransmitterConfig struct {
 	c toml.MercuryTransmitter
 }
 
+func (m *mercuryTransmitterConfig) Protocol() config.MercuryTransmitterProtocol {
+	return *m.c.Protocol
+}
+
 func (m *mercuryTransmitterConfig) TransmitQueueMaxSize() uint32 {
 	return *m.c.TransmitQueueMaxSize
 }
 
-func (m *mercuryTransmitterConfig) TransmitTimeout() commonconfig.Duration {
-	return *m.c.TransmitTimeout
+func (m *mercuryTransmitterConfig) TransmitTimeout() time.Duration {
+	return m.c.TransmitTimeout.Duration()
+}
+
+func (m *mercuryTransmitterConfig) TransmitConcurrency() uint32 {
+	return *m.c.TransmitConcurrency
+}
+
+func (m *mercuryTransmitterConfig) ReaperFrequency() time.Duration {
+	return m.c.ReaperFrequency.Duration()
+}
+
+func (m *mercuryTransmitterConfig) ReaperMaxAge() time.Duration {
+	return m.c.ReaperMaxAge.Duration()
 }
 
 type mercuryConfig struct {
@@ -80,4 +95,8 @@ func (m *mercuryConfig) TLS() config.MercuryTLS {
 
 func (m *mercuryConfig) Transmitter() config.MercuryTransmitter {
 	return &mercuryTransmitterConfig{c: m.c.Transmitter}
+}
+
+func (m *mercuryConfig) VerboseLogging() bool {
+	return *m.c.VerboseLogging
 }

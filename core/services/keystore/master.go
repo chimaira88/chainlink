@@ -9,19 +9,21 @@ import (
 
 	"github.com/pkg/errors"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/aptoskey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/cosmoskey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/csakey"
-	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/dkgencryptkey"
-	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/dkgsignkey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ethkey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ocr2key"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ocrkey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/p2pkey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/solkey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/starkkey"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/tonkey"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/tronkey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/vrfkey"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/workflowkey"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
@@ -35,12 +37,8 @@ var (
 // necessary because it is lazily evaluated
 type DefaultEVMChainIDFunc func() (defaultEVMChainID *big.Int, err error)
 
-//go:generate mockery --quiet --name Master --output ./mocks/ --case=underscore
-
 type Master interface {
 	CSA() CSA
-	DKGSign() DKGSign
-	DKGEncrypt() DKGEncrypt
 	Eth() Eth
 	OCR() OCR
 	OCR2() OCR2
@@ -48,24 +46,29 @@ type Master interface {
 	Solana() Solana
 	Cosmos() Cosmos
 	StarkNet() StarkNet
+	Aptos() Aptos
+	Tron() Tron
+	TON() TON
 	VRF() VRF
+	Workflow() Workflow
 	Unlock(ctx context.Context, password string) error
 	IsEmpty(ctx context.Context) (bool, error)
 }
-
 type master struct {
 	*keyManager
-	cosmos     *cosmos
-	csa        *csa
-	eth        *eth
-	ocr        *ocr
-	ocr2       ocr2
-	p2p        *p2p
-	solana     *solana
-	starknet   *starknet
-	vrf        *vrf
-	dkgSign    *dkgSign
-	dkgEncrypt *dkgEncrypt
+	cosmos   *cosmos
+	csa      *csa
+	eth      *eth
+	ocr      *ocr
+	ocr2     ocr2
+	p2p      *p2p
+	solana   *solana
+	starknet *starknet
+	aptos    *aptos
+	tron     *tron
+	ton      *ton
+	vrf      *vrf
+	workflow *workflow
 }
 
 func New(ds sqlutil.DataSource, scryptParams utils.ScryptParams, lggr logger.Logger) Master {
@@ -73,13 +76,13 @@ func New(ds sqlutil.DataSource, scryptParams utils.ScryptParams, lggr logger.Log
 }
 
 func newMaster(ds sqlutil.DataSource, scryptParams utils.ScryptParams, lggr logger.Logger) *master {
-	orm := NewORM(ds, lggr)
+	orm := NewORM(ds)
 	km := &keyManager{
 		orm:          orm,
 		keystateORM:  orm,
 		scryptParams: scryptParams,
 		lock:         &sync.RWMutex{},
-		logger:       lggr.Named("KeyStore"),
+		logger:       logger.Named(lggr, "KeyStore"),
 	}
 
 	return &master{
@@ -92,18 +95,12 @@ func newMaster(ds sqlutil.DataSource, scryptParams utils.ScryptParams, lggr logg
 		p2p:        newP2PKeyStore(km),
 		solana:     newSolanaKeyStore(km),
 		starknet:   newStarkNetKeyStore(km),
+		aptos:      newAptosKeyStore(km),
+		tron:       newTronKeyStore(km),
+		ton:        newTONKeyStore(km),
 		vrf:        newVRFKeyStore(km),
-		dkgSign:    newDKGSignKeyStore(km),
-		dkgEncrypt: newDKGEncryptKeyStore(km),
+		workflow:   newWorkflowKeyStore(km),
 	}
-}
-
-func (ks *master) DKGEncrypt() DKGEncrypt {
-	return ks.dkgEncrypt
-}
-
-func (ks master) DKGSign() DKGSign {
-	return ks.dkgSign
 }
 
 func (ks master) CSA() CSA {
@@ -138,8 +135,24 @@ func (ks *master) StarkNet() StarkNet {
 	return ks.starknet
 }
 
+func (ks *master) Aptos() Aptos {
+	return ks.aptos
+}
+
+func (ks *master) Tron() Tron {
+	return ks.tron
+}
+
+func (ks *master) TON() TON {
+	return ks.ton
+}
+
 func (ks *master) VRF() VRF {
 	return ks.vrf
+}
+
+func (ks *master) Workflow() Workflow {
+	return ks.workflow
 }
 
 type ORM interface {
@@ -273,12 +286,16 @@ func GetFieldNameForKey(unknownKey Key) (string, error) {
 		return "Solana", nil
 	case starkkey.Key:
 		return "StarkNet", nil
+	case aptoskey.Key:
+		return "Aptos", nil
+	case tronkey.Key:
+		return "Tron", nil
+	case tonkey.Key:
+		return "TON", nil
 	case vrfkey.KeyV2:
 		return "VRF", nil
-	case dkgsignkey.Key:
-		return "DKGSign", nil
-	case dkgencryptkey.Key:
-		return "DKGEncrypt", nil
+	case workflowkey.Key:
+		return "Workflow", nil
 	}
 	return "", fmt.Errorf("unknown key type: %T", unknownKey)
 }

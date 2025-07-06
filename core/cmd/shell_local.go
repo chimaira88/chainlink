@@ -2,57 +2,48 @@ package cmd
 
 import (
 	"context"
-	crand "crypto/rand"
-	"database/sql"
+	stderrors "errors"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"net/http"
-	"net/url"
 	"os"
-	"os/exec"
-	"path"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	gethCommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/fatih/color"
-	"github.com/lib/pq"
-
-	"github.com/kylelemons/godebug/diff"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
-	"go.uber.org/multierr"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/guregu/null.v4"
 
-	"github.com/jmoiron/sqlx"
+	chain_selectors "github.com/smartcontractkit/chain-selectors"
 
-	cutils "github.com/smartcontractkit/chainlink-common/pkg/utils"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/gas"
+	"github.com/smartcontractkit/chainlink-evm/pkg/keys"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
 
 	"github.com/smartcontractkit/chainlink/v2/core/build"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/chaintype"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
 	"github.com/smartcontractkit/chainlink/v2/core/sessions"
 	"github.com/smartcontractkit/chainlink/v2/core/shutdown"
 	"github.com/smartcontractkit/chainlink/v2/core/static"
-	"github.com/smartcontractkit/chainlink/v2/core/store/dialects"
+	"github.com/smartcontractkit/chainlink/v2/core/store"
 	"github.com/smartcontractkit/chainlink/v2/core/store/migrate"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/web"
 	webPresenters "github.com/smartcontractkit/chainlink/v2/core/web/presenters"
-	"github.com/smartcontractkit/chainlink/v2/internal/testdb"
 )
 
 var ErrProfileTooLong = errors.New("requested profile duration too large")
@@ -173,6 +164,10 @@ func initLocalSubCmds(s *Shell, safe bool) []cli.Command {
 							Name:  "dangerWillRobinson",
 							Usage: "set to true to enable dropping non-test databases",
 						},
+						cli.BoolFlag{
+							Name:  "force",
+							Usage: "set to true to force the reset by dropping any existing connections to the database",
+						},
 					},
 				},
 				{
@@ -185,6 +180,10 @@ func initLocalSubCmds(s *Shell, safe bool) []cli.Command {
 						cli.BoolFlag{
 							Name:  "user-only",
 							Usage: "only include test user fixture",
+						},
+						cli.BoolFlag{
+							Name:  "force",
+							Usage: "set to true to force the reset by dropping any existing connections to the database",
 						},
 					},
 				},
@@ -357,6 +356,7 @@ func (s *Shell) runNode(c *cli.Context) error {
 		if err := ldb.Close(); err != nil {
 			lggr.Criticalf("Failed to close LockedDB: %v", err)
 		}
+		lggr.Debug("Closed DB")
 		if err := s.CloseLogger(); err != nil {
 			log.Printf("Failed to close Logger: %v", err)
 		}
@@ -374,35 +374,47 @@ func (s *Shell) runNode(c *cli.Context) error {
 	// From now on, DB locks and DB connection will be released on every return.
 	// Keep watching on logger.Fatal* calls and os.Exit(), because defer will not be executed.
 
-	app, err := s.AppFactory.NewApplication(rootCtx, s.Config, s.Logger, ldb.DB())
+	app, err := s.AppFactory.NewApplication(rootCtx, s.Config, s.Logger, s.Registerer, ldb.DB(), s.KeyStoreAuthenticator)
 	if err != nil {
 		return s.errorOut(errors.Wrap(err, "fatal error instantiating application"))
 	}
 
 	// Local shell initialization always uses local auth users table for admin auth
 	authProviderORM := app.BasicAdminUsersORM()
-	keyStore := app.GetKeyStore()
-	err = s.KeyStoreAuthenticator.authenticate(rootCtx, keyStore, s.Config.Password())
-	if err != nil {
-		return errors.Wrap(err, "error authenticating keystore")
-	}
-
-	legacyEVMChains := app.GetRelayers().LegacyEVMChains()
 
 	if s.Config.EVMEnabled() {
-		chainList, err2 := legacyEVMChains.List()
-		if err2 != nil {
-			return fmt.Errorf("error listing legacy evm chains: %w", err2)
+		// ensure any imported keys are imported
+		for _, k := range s.Config.ImportedEthKeys().List() {
+			lggr.Debug("Importing eth key")
+			id, err2 := chain_selectors.GetChainIDFromSelector(k.ChainDetails().ChainSelector)
+			if err != nil {
+				return s.errorOut(errors.Wrapf(err2, "error getting chain id from selector when trying to import eth key %v", k.JSON()))
+			}
+			cid, _ := big.NewInt(0).SetString(id, 10)
+			if cid == nil {
+				return s.errorOut(fmt.Errorf("error converting chain id '%s' to big int", id))
+			}
+			_, err2 = app.GetKeyStore().Eth().Import(rootCtx, []byte(k.JSON()), k.Password(), cid)
+			if err2 != nil {
+				if errors.Is(err2, keystore.ErrKeyExists) {
+					lggr.Debugf("Eth key %s already exists for chain %v", k.JSON(), k.ChainDetails())
+					continue
+				}
+				return s.errorOut(errors.Wrap(err2, "error importing eth key"))
+			}
+			lggr.Debugf("Imported eth key %s for chain %v", k.JSON(), k.ChainDetails())
 		}
-		for _, ch := range chainList {
-			if ch.Config().EVM().AutoCreateKey() {
-				lggr.Debugf("AutoCreateKey=true, will ensure EVM key for chain %s", ch.ID())
-				err2 := app.GetKeyStore().Eth().EnsureKeys(rootCtx, ch.ID())
+
+		for _, cs := range s.Config.EVMConfigs() {
+			id := cs.ChainID.ToInt()
+			if b := cs.AutoCreateKey; b != nil && *b {
+				lggr.Debugf("AutoCreateKey=true, will ensure EVM key for chain %s", id)
+				err2 := app.GetKeyStore().Eth().EnsureKeys(rootCtx, id)
 				if err2 != nil {
 					return errors.Wrap(err2, "failed to ensure keystore keys")
 				}
 			} else {
-				lggr.Debugf("AutoCreateKey=false, will not ensure EVM key for chain %s", ch.ID())
+				lggr.Debugf("AutoCreateKey=false, will not ensure EVM key for chain %s", id)
 			}
 		}
 	}
@@ -427,12 +439,31 @@ func (s *Shell) runNode(c *cli.Context) error {
 		if s.Config.StarkNetEnabled() {
 			enabledChains = append(enabledChains, chaintype.StarkNet)
 		}
+		if s.Config.AptosEnabled() {
+			enabledChains = append(enabledChains, chaintype.Aptos)
+		}
+		if s.Config.TronEnabled() {
+			enabledChains = append(enabledChains, chaintype.Tron)
+		}
+		if s.Config.TONEnabled() {
+			enabledChains = append(enabledChains, chaintype.TON)
+		}
 		err2 := app.GetKeyStore().OCR2().EnsureKeys(rootCtx, enabledChains...)
 		if err2 != nil {
 			return errors.Wrap(err2, "failed to ensure ocr key")
 		}
 	}
+
 	if s.Config.P2P().Enabled() {
+		if s.Config.ImportedP2PKey().JSON() != "" {
+			lggr.Debugf("Importing p2p key %s", s.Config.ImportedP2PKey().JSON())
+			_, err2 := app.GetKeyStore().P2P().Import(rootCtx, []byte(s.Config.ImportedP2PKey().JSON()), s.Config.ImportedP2PKey().Password())
+			if errors.Is(err2, keystore.ErrKeyExists) {
+				lggr.Debugf("P2P key already exists %s", s.Config.ImportedP2PKey().JSON())
+			} else if err2 != nil {
+				return s.errorOut(errors.Wrap(err2, "error importing p2p key"))
+			}
+		}
 		err2 := app.GetKeyStore().P2P().EnsureKey(rootCtx)
 		if err2 != nil {
 			return errors.Wrap(err2, "failed to ensure p2p key")
@@ -456,8 +487,31 @@ func (s *Shell) runNode(c *cli.Context) error {
 			return errors.Wrap(err2, "failed to ensure starknet key")
 		}
 	}
+	if s.Config.AptosEnabled() {
+		err2 := app.GetKeyStore().Aptos().EnsureKey(rootCtx)
+		if err2 != nil {
+			return errors.Wrap(err2, "failed to ensure aptos key")
+		}
+	}
+	if s.Config.TronEnabled() {
+		err2 := app.GetKeyStore().Tron().EnsureKey(rootCtx)
+		if err2 != nil {
+			return errors.Wrap(err2, "failed to ensure tron key")
+		}
+	}
+	if s.Config.TONEnabled() {
+		err2 := app.GetKeyStore().TON().EnsureKey(rootCtx)
+		if err2 != nil {
+			return errors.Wrap(err2, "failed to ensure ton key")
+		}
+	}
 
-	err2 := app.GetKeyStore().CSA().EnsureKey(rootCtx)
+	err2 := app.GetKeyStore().Workflow().EnsureKey(rootCtx)
+	if err2 != nil {
+		return errors.Wrap(err2, "failed to ensure workflow key")
+	}
+
+	err2 = app.GetKeyStore().CSA().EnsureKey(rootCtx)
 	if err2 != nil {
 		return errors.Wrap(err2, "failed to ensure CSA key")
 	}
@@ -604,13 +658,13 @@ func (s *Shell) RebroadcastTransactions(c *cli.Context) (err error) {
 	}
 
 	lggr := logger.Sugared(s.Logger.Named("RebroadcastTransactions"))
-	db, err := pg.OpenUnlockedDB(s.Config.AppID(), s.Config.Database())
+	db, err := pg.OpenUnlockedDB(ctx, s.Config.AppID(), s.Config.Database())
 	if err != nil {
 		return s.errorOut(errors.Wrap(err, "opening DB"))
 	}
 	defer lggr.ErrorIfFn(db.Close, "Error closing db")
 
-	app, err := s.AppFactory.NewApplication(ctx, s.Config, lggr, db)
+	app, err := s.AppFactory.NewApplication(ctx, s.Config, lggr, s.Registerer, db, s.KeyStoreAuthenticator)
 	if err != nil {
 		return s.errorOut(errors.Wrap(err, "fatal error instantiating application"))
 	}
@@ -618,9 +672,13 @@ func (s *Shell) RebroadcastTransactions(c *cli.Context) (err error) {
 	// TODO: BCF-2511 once the dust settles on BCF-2440/1 evaluate how the
 	// [loop.Relayer] interface needs to be extended to support programming similar to
 	// this pattern but in a chain-agnostic way
-	chain, err := app.GetRelayers().LegacyEVMChains().Get(chainID.String())
+	chainService, err := app.GetRelayers().LegacyEVMChains().Get(chainID.String())
 	if err != nil {
 		return s.errorOut(err)
+	}
+	chain, ok := chainService.(legacyevm.Chain)
+	if !ok {
+		return fmt.Errorf("transaction rebroadcast is not available in loop mode: %w", stderrors.ErrUnsupported)
 	}
 	keyStore := app.GetKeyStore()
 
@@ -634,14 +692,14 @@ func (s *Shell) RebroadcastTransactions(c *cli.Context) (err error) {
 	if c.IsSet("password") {
 		pwd, err2 := utils.PasswordFromFile(c.String("password"))
 		if err2 != nil {
-			return s.errorOut(fmt.Errorf("error reading password: %+v", err2))
+			return s.errorOut(fmt.Errorf("error reading password: %w", err2))
 		}
 		s.Config.SetPasswords(&pwd, nil)
 	}
 
 	err = s.Config.Validate()
 	if err != nil {
-		return s.errorOut(fmt.Errorf("error validating configuration: %+v", err))
+		return s.errorOut(fmt.Errorf("error validating configuration: %w", err))
 	}
 
 	err = keyStore.Unlock(ctx, s.Config.Password().Keystore())
@@ -653,21 +711,29 @@ func (s *Shell) RebroadcastTransactions(c *cli.Context) (err error) {
 		return s.errorOut(err)
 	}
 
+	ks := keys.NewChainStore(keystore.NewEthSigner(keyStore.Eth(), chain.ID()), chain.ID())
+
 	s.Logger.Infof("Rebroadcasting transactions from %v to %v", beginningNonce, endingNonce)
 
 	orm := txmgr.NewTxStore(app.GetDB(), lggr)
-	txBuilder := txmgr.NewEvmTxAttemptBuilder(*ethClient.ConfiguredChainID(), chain.Config().EVM().GasEstimator(), keyStore.Eth(), nil)
-	cfg := txmgr.NewEvmTxmConfig(chain.Config().EVM())
+	txBuilder := txmgr.NewEvmTxAttemptBuilder(*ethClient.ConfiguredChainID(), chain.Config().EVM().GasEstimator(), ks, nil)
 	feeCfg := txmgr.NewEvmTxmFeeConfig(chain.Config().EVM().GasEstimator())
+	stuckTxDetector := txmgr.NewStuckTxDetector(lggr, ethClient.ConfiguredChainID(), "", assets.NewWei(assets.NewEth(100).ToInt()), chain.Config().EVM().Transactions().AutoPurge(), nil, orm, ethClient)
+	metrics, err := txmgr.NewEVMTxmMetrics(ethClient.ConfiguredChainID().String())
+	if err != nil {
+		return s.errorOut(err)
+	}
 	ec := txmgr.NewEvmConfirmer(orm, txmgr.NewEvmTxmClient(ethClient, chain.Config().EVM().NodePool().Errors()),
-		cfg, feeCfg, chain.Config().EVM().Transactions(), app.GetConfig().Database(), keyStore.Eth(), txBuilder, chain.Logger())
+		feeCfg, chain.Config().EVM().Transactions(), app.GetConfig().Database(), ks, txBuilder, chain.Logger(), stuckTxDetector, metrics)
 	totalNonces := endingNonce - beginningNonce + 1
 	nonces := make([]evmtypes.Nonce, totalNonces)
 	for i := int64(0); i < totalNonces; i++ {
 		nonces[i] = evmtypes.Nonce(beginningNonce + i)
 	}
-	err = ec.ForceRebroadcast(ctx, nonces, gas.EvmFee{Legacy: assets.NewWeiI(int64(gasPriceWei))}, address, uint64(overrideGasLimit))
-	return s.errorOut(err)
+	if gasPriceWei <= math.MaxInt64 {
+		return s.errorOut(ec.ForceRebroadcast(ctx, nonces, gas.EvmFee{GasPrice: assets.NewWeiI(int64(gasPriceWei))}, address, uint64(overrideGasLimit)))
+	}
+	return s.errorOut(fmt.Errorf("integer overflow conversion error. GasPrice: %v", gasPriceWei))
 }
 
 type HealthCheckPresenter struct {
@@ -741,37 +807,19 @@ func (s *Shell) ctx() context.Context {
 func (s *Shell) ResetDatabase(c *cli.Context) error {
 	ctx := s.ctx()
 	cfg := s.Config.Database()
-	parsed := cfg.URL()
-	if parsed.String() == "" {
+	u := cfg.URL()
+	if u.String() == "" {
 		return s.errorOut(errDBURLMissing)
 	}
-
 	dangerMode := c.Bool("dangerWillRobinson")
-
-	dbname := parsed.Path[1:]
+	dbname := u.Path[1:]
 	if !dangerMode && !strings.HasSuffix(dbname, "_test") {
 		return s.errorOut(fmt.Errorf("cannot reset database named `%s`. This command can only be run against databases with a name that ends in `_test`, to prevent accidental data loss. If you REALLY want to reset this database, pass in the -dangerWillRobinson option", dbname))
 	}
-	lggr := s.Logger
-	lggr.Infof("Resetting database: %#v", parsed.String())
-	lggr.Debugf("Dropping and recreating database: %#v", parsed.String())
-	if err := dropAndCreateDB(parsed); err != nil {
-		return s.errorOut(err)
-	}
-	lggr.Debugf("Migrating database: %#v", parsed.String())
-	if err := migrateDB(ctx, cfg, lggr); err != nil {
-		return s.errorOut(err)
-	}
-	schema, err := dumpSchema(parsed)
-	if err != nil {
-		return s.errorOut(err)
-	}
-	lggr.Debugf("Testing rollback and re-migrate for database: %#v", parsed.String())
-	var baseVersionID int64 = 54
-	if err := downAndUpDB(ctx, cfg, lggr, baseVersionID); err != nil {
-		return s.errorOut(err)
-	}
-	if err := checkSchema(parsed, schema); err != nil {
+
+	force := c.Bool("force")
+
+	if err := store.ResetDatabase(ctx, s.Logger, cfg, force); err != nil {
 		return s.errorOut(err)
 	}
 	return nil
@@ -786,122 +834,8 @@ func (s *Shell) PrepareTestDatabase(c *cli.Context) error {
 
 	// Creating pristine DB copy to speed up FullTestDB
 	dbUrl := cfg.Database().URL()
-	db, err := sqlx.Open(string(dialects.Postgres), dbUrl.String())
-	if err != nil {
-		return s.errorOut(err)
-	}
-	defer db.Close()
-	templateDB := strings.Trim(dbUrl.Path, "/")
-	if err = dropAndCreatePristineDB(db, templateDB); err != nil {
-		return s.errorOut(err)
-	}
-
 	userOnly := c.Bool("user-only")
-	fixturePath := "../store/fixtures/fixtures.sql"
-	if userOnly {
-		fixturePath = "../store/fixtures/users_only_fixture.sql"
-	}
-	if err = insertFixtures(dbUrl, fixturePath); err != nil {
-		return s.errorOut(err)
-	}
-	if err = dropDanglingTestDBs(s.Logger, db); err != nil {
-		return s.errorOut(err)
-	}
-	return s.errorOut(randomizeTestDBSequences(db))
-}
-
-func dropDanglingTestDBs(lggr logger.Logger, db *sqlx.DB) (err error) {
-	// Drop all old dangling databases
-	var dbs []string
-	if err = db.Select(&dbs, `SELECT datname FROM pg_database WHERE datistemplate = false;`); err != nil {
-		return err
-	}
-
-	// dropping database is very slow in postgres so we parallelise it here
-	nWorkers := 25
-	ch := make(chan string)
-	var wg sync.WaitGroup
-	wg.Add(nWorkers)
-	errCh := make(chan error, len(dbs))
-	for i := 0; i < nWorkers; i++ {
-		go func() {
-			defer wg.Done()
-			for dbname := range ch {
-				lggr.Infof("Dropping old, dangling test database: %q", dbname)
-				gerr := cutils.JustError(db.Exec(fmt.Sprintf(`DROP DATABASE IF EXISTS %s`, dbname)))
-				errCh <- gerr
-			}
-		}()
-	}
-	for _, dbname := range dbs {
-		if strings.HasPrefix(dbname, testdb.TestDBNamePrefix) && !strings.HasSuffix(dbname, "_pristine") {
-			ch <- dbname
-		}
-	}
-	close(ch)
-	wg.Wait()
-	close(errCh)
-	for gerr := range errCh {
-		err = multierr.Append(err, gerr)
-	}
-	return
-}
-
-type failedToRandomizeTestDBSequencesError struct{}
-
-func (m *failedToRandomizeTestDBSequencesError) Error() string {
-	return "failed to randomize test db sequences"
-}
-
-// randomizeTestDBSequences randomizes sequenced table columns sequence
-// This is necessary as to avoid false positives in some test cases.
-func randomizeTestDBSequences(db *sqlx.DB) error {
-	// not ideal to hard code this, but also not safe to do it programmatically :(
-	schemas := pq.Array([]string{"public", "evm"})
-	seqRows, err := db.Query(`SELECT sequence_schema, sequence_name, minimum_value FROM information_schema.sequences WHERE sequence_schema IN ($1)`, schemas)
-	if err != nil {
-		return fmt.Errorf("%s: error fetching sequences: %s", failedToRandomizeTestDBSequencesError{}, err)
-	}
-
-	defer seqRows.Close()
-	for seqRows.Next() {
-		var sequenceSchema, sequenceName string
-		var minimumSequenceValue int64
-		if err = seqRows.Scan(&sequenceSchema, &sequenceName, &minimumSequenceValue); err != nil {
-			return fmt.Errorf("%s: failed scanning sequence rows: %s", failedToRandomizeTestDBSequencesError{}, err)
-		}
-
-		if sequenceName == "goose_migrations_id_seq" || sequenceName == "configurations_id_seq" {
-			continue
-		}
-
-		var randNum *big.Int
-		randNum, err = crand.Int(crand.Reader, ubig.NewI(10000).ToInt())
-		if err != nil {
-			return fmt.Errorf("%s: failed to generate random number", failedToRandomizeTestDBSequencesError{})
-		}
-		randNum.Add(randNum, big.NewInt(minimumSequenceValue))
-
-		if _, err = db.Exec(fmt.Sprintf("ALTER SEQUENCE %s.%s RESTART WITH %d", sequenceSchema, sequenceName, randNum)); err != nil {
-			return fmt.Errorf("%s: failed to alter and restart %s sequence: %w", failedToRandomizeTestDBSequencesError{}, sequenceName, err)
-		}
-	}
-
-	if err = seqRows.Err(); err != nil {
-		return fmt.Errorf("%s: failed to iterate through sequences: %w", failedToRandomizeTestDBSequencesError{}, err)
-	}
-
-	return nil
-}
-
-// PrepareTestDatabaseUserOnly calls ResetDatabase then loads only user fixtures required for local
-// testing against testnets. Does not include fake chain fixtures.
-func (s *Shell) PrepareTestDatabaseUserOnly(c *cli.Context) error {
-	if err := s.ResetDatabase(c); err != nil {
-		return s.errorOut(err)
-	}
-	cfg := s.Config
-	if err := insertFixtures(cfg.Database().URL(), "../store/fixtures/users_only_fixtures.sql"); err != nil {
+	if err := store.PrepareTestDB(s.Logger, dbUrl, userOnly); err != nil {
 		return s.errorOut(err)
 	}
 	return nil
@@ -916,13 +850,13 @@ func (s *Shell) MigrateDatabase(_ *cli.Context) error {
 		return s.errorOut(errDBURLMissing)
 	}
 
-	err := migrate.SetMigrationENVVars(s.Config)
+	err := migrate.SetMigrationENVVars(s.Config.EVMConfigs())
 	if err != nil {
 		return err
 	}
 
 	s.Logger.Infof("Migrating database: %#v", parsed.String())
-	if err := migrateDB(ctx, cfg, s.Logger); err != nil {
+	if err := migrateDB(ctx, cfg); err != nil {
 		return s.errorOut(err)
 	}
 	return nil
@@ -941,13 +875,13 @@ func (s *Shell) RollbackDatabase(c *cli.Context) error {
 		version = null.IntFrom(numVersion)
 	}
 
-	db, err := newConnection(s.Config.Database())
+	db, err := store.NewConnection(ctx, s.Config.Database())
 	if err != nil {
-		return fmt.Errorf("failed to initialize orm: %v", err)
+		return fmt.Errorf("failed to initialize orm: %w", err)
 	}
 
 	if err := migrate.Rollback(ctx, db.DB, version); err != nil {
-		return fmt.Errorf("migrateDB failed: %v", err)
+		return fmt.Errorf("migrateDB failed: %w", err)
 	}
 
 	return nil
@@ -956,14 +890,14 @@ func (s *Shell) RollbackDatabase(c *cli.Context) error {
 // VersionDatabase displays the current database version.
 func (s *Shell) VersionDatabase(_ *cli.Context) error {
 	ctx := s.ctx()
-	db, err := newConnection(s.Config.Database())
+	db, err := store.NewConnection(ctx, s.Config.Database())
 	if err != nil {
-		return fmt.Errorf("failed to initialize orm: %v", err)
+		return fmt.Errorf("failed to initialize orm: %w", err)
 	}
 
 	version, err := migrate.Current(ctx, db.DB)
 	if err != nil {
-		return fmt.Errorf("migrateDB failed: %v", err)
+		return fmt.Errorf("migrateDB failed: %w", err)
 	}
 
 	s.Logger.Infof("Database version: %v", version)
@@ -973,25 +907,26 @@ func (s *Shell) VersionDatabase(_ *cli.Context) error {
 // StatusDatabase displays the database migration status
 func (s *Shell) StatusDatabase(_ *cli.Context) error {
 	ctx := s.ctx()
-	db, err := newConnection(s.Config.Database())
+	db, err := store.NewConnection(ctx, s.Config.Database())
 	if err != nil {
-		return fmt.Errorf("failed to initialize orm: %v", err)
+		return fmt.Errorf("failed to initialize orm: %w", err)
 	}
 
 	if err = migrate.Status(ctx, db.DB); err != nil {
-		return fmt.Errorf("Status failed: %v", err)
+		return fmt.Errorf("Status failed: %w", err)
 	}
 	return nil
 }
 
 // CreateMigration displays the database migration status
 func (s *Shell) CreateMigration(c *cli.Context) error {
+	ctx := s.ctx()
 	if !c.Args().Present() {
 		return s.errorOut(errors.New("You must specify a migration name"))
 	}
-	db, err := newConnection(s.Config.Database())
+	db, err := store.NewConnection(ctx, s.Config.Database())
 	if err != nil {
-		return fmt.Errorf("failed to initialize orm: %v", err)
+		return fmt.Errorf("failed to initialize orm: %w", err)
 	}
 
 	migrationType := c.String("type")
@@ -1000,13 +935,14 @@ func (s *Shell) CreateMigration(c *cli.Context) error {
 	}
 
 	if err = migrate.Create(db.DB, c.Args().First(), migrationType); err != nil {
-		return fmt.Errorf("Status failed: %v", err)
+		return fmt.Errorf("Status failed: %w", err)
 	}
 	return nil
 }
 
 // CleanupChainTables deletes database table rows based on chain type and chain id input.
 func (s *Shell) CleanupChainTables(c *cli.Context) error {
+	ctx := s.ctx()
 	cfg := s.Config.Database()
 	parsed := cfg.URL()
 	if parsed.String() == "" {
@@ -1018,7 +954,7 @@ func (s *Shell) CleanupChainTables(c *cli.Context) error {
 		return s.errorOut(fmt.Errorf("cannot reset database named `%s`. This command can only be run against databases with a name that ends in `_test`, to prevent accidental data loss. If you really want to delete chain specific data from this database, pass in the --danger option", dbname))
 	}
 
-	db, err := newConnection(cfg)
+	db, err := store.NewConnection(ctx, cfg)
 	if err != nil {
 		return s.errorOut(errors.Wrap(err, "error connecting to the database"))
 	}
@@ -1061,142 +997,16 @@ func (s *Shell) CleanupChainTables(c *cli.Context) error {
 	return nil
 }
 
-type dbConfig interface {
-	DefaultIdleInTxSessionTimeout() time.Duration
-	DefaultLockTimeout() time.Duration
-	MaxOpenConns() int
-	MaxIdleConns() int
-	URL() url.URL
-	Dialect() dialects.DialectName
-}
-
-func newConnection(cfg dbConfig) (*sqlx.DB, error) {
-	parsed := cfg.URL()
-	if parsed.String() == "" {
-		return nil, errDBURLMissing
-	}
-	return pg.NewConnection(parsed.String(), cfg.Dialect(), cfg)
-}
-
-func dropAndCreateDB(parsed url.URL) (err error) {
-	// Cannot drop the database if we are connected to it, so we must connect
-	// to a different one. template1 should be present on all postgres installations
-	dbname := parsed.Path[1:]
-	parsed.Path = "/template1"
-	db, err := sql.Open(string(dialects.Postgres), parsed.String())
+func migrateDB(ctx context.Context, config store.Config) error {
+	db, err := store.NewConnection(ctx, config)
 	if err != nil {
-		return fmt.Errorf("unable to open postgres database for creating test db: %+v", err)
-	}
-	defer func() {
-		if cerr := db.Close(); cerr != nil {
-			err = multierr.Append(err, cerr)
-		}
-	}()
-
-	_, err = db.Exec(fmt.Sprintf(`DROP DATABASE IF EXISTS "%s"`, dbname))
-	if err != nil {
-		return fmt.Errorf("unable to drop postgres database: %v", err)
-	}
-	_, err = db.Exec(fmt.Sprintf(`CREATE DATABASE "%s"`, dbname))
-	if err != nil {
-		return fmt.Errorf("unable to create postgres database: %v", err)
-	}
-	return nil
-}
-
-func dropAndCreatePristineDB(db *sqlx.DB, template string) (err error) {
-	_, err = db.Exec(fmt.Sprintf(`DROP DATABASE IF EXISTS "%s"`, testdb.PristineDBName))
-	if err != nil {
-		return fmt.Errorf("unable to drop postgres database: %v", err)
-	}
-	_, err = db.Exec(fmt.Sprintf(`CREATE DATABASE "%s" WITH TEMPLATE "%s"`, testdb.PristineDBName, template))
-	if err != nil {
-		return fmt.Errorf("unable to create postgres database: %v", err)
-	}
-	return nil
-}
-
-func migrateDB(ctx context.Context, config dbConfig, lggr logger.Logger) error {
-	db, err := newConnection(config)
-	if err != nil {
-		return fmt.Errorf("failed to initialize orm: %v", err)
+		return fmt.Errorf("failed to initialize orm: %w", err)
 	}
 
 	if err = migrate.Migrate(ctx, db.DB); err != nil {
-		return fmt.Errorf("migrateDB failed: %v", err)
+		return fmt.Errorf("migrateDB failed: %w", err)
 	}
 	return db.Close()
-}
-
-func downAndUpDB(ctx context.Context, cfg dbConfig, lggr logger.Logger, baseVersionID int64) error {
-	db, err := newConnection(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to initialize orm: %v", err)
-	}
-	if err = migrate.Rollback(ctx, db.DB, null.IntFrom(baseVersionID)); err != nil {
-		return fmt.Errorf("test rollback failed: %v", err)
-	}
-	if err = migrate.Migrate(ctx, db.DB); err != nil {
-		return fmt.Errorf("second migrateDB failed: %v", err)
-	}
-	return db.Close()
-}
-
-func dumpSchema(dbURL url.URL) (string, error) {
-	args := []string{
-		dbURL.String(),
-		"--schema-only",
-	}
-	cmd := exec.Command(
-		"pg_dump", args...,
-	)
-
-	schema, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			return "", fmt.Errorf("failed to dump schema: %v\n%s", err, string(ee.Stderr))
-		}
-		return "", fmt.Errorf("failed to dump schema: %v", err)
-	}
-	return string(schema), nil
-}
-
-func checkSchema(dbURL url.URL, prevSchema string) error {
-	newSchema, err := dumpSchema(dbURL)
-	if err != nil {
-		return err
-	}
-	df := diff.Diff(prevSchema, newSchema)
-	if len(df) > 0 {
-		fmt.Println(df)
-		return errors.New("schema pre- and post- rollback does not match (ctrl+f for '+' or '-' to find the changed lines)")
-	}
-	return nil
-}
-
-func insertFixtures(dbURL url.URL, pathToFixtures string) (err error) {
-	db, err := sql.Open(string(dialects.Postgres), dbURL.String())
-	if err != nil {
-		return fmt.Errorf("unable to open postgres database for creating test db: %+v", err)
-	}
-	defer func() {
-		if cerr := db.Close(); cerr != nil {
-			err = multierr.Append(err, cerr)
-		}
-	}()
-
-	_, filename, _, ok := runtime.Caller(1)
-	if !ok {
-		return errors.New("could not get runtime.Caller(1)")
-	}
-	filepath := path.Join(path.Dir(filename), pathToFixtures)
-	fixturesSQL, err := os.ReadFile(filepath)
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec(string(fixturesSQL))
-	return err
 }
 
 // RemoveBlocks - removes blocks after the specified blocks number
@@ -1217,7 +1027,7 @@ func (s *Shell) RemoveBlocks(c *cli.Context) error {
 	cfg := s.Config
 	err := cfg.Validate()
 	if err != nil {
-		return s.errorOut(fmt.Errorf("error validating configuration: %+v", err))
+		return s.errorOut(fmt.Errorf("error validating configuration: %w", err))
 	}
 
 	lggr := logger.Sugared(s.Logger.Named("RemoveBlocks"))
@@ -1245,7 +1055,7 @@ func (s *Shell) RemoveBlocks(c *cli.Context) error {
 	// From now on, DB locks and DB connection will be released on every return.
 	// Keep watching on logger.Fatal* calls and os.Exit(), because defer will not be executed.
 
-	app, err := s.AppFactory.NewApplication(ctx, s.Config, s.Logger, ldb.DB())
+	app, err := s.AppFactory.NewApplication(ctx, s.Config, s.Logger, s.Registerer, ldb.DB(), s.KeyStoreAuthenticator)
 	if err != nil {
 		return s.errorOut(errors.Wrap(err, "fatal error instantiating application"))
 	}

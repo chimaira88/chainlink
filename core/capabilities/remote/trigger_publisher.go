@@ -2,15 +2,20 @@ package remote
 
 import (
 	"context"
-	sync "sync"
+	"crypto/sha256"
+	"encoding/binary"
+	"sync"
 	"time"
 
-	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	commoncap "github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/pb"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
+
+	"github.com/smartcontractkit/chainlink/v2/core/capabilities/remote/aggregation"
+	"github.com/smartcontractkit/chainlink/v2/core/capabilities/remote/messagecache"
 	"github.com/smartcontractkit/chainlink/v2/core/capabilities/remote/types"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/capabilities/validation"
 	p2ptypes "github.com/smartcontractkit/chainlink/v2/core/services/p2p/types"
 )
 
@@ -21,67 +26,118 @@ import (
 //
 // TriggerPublisher communicates with corresponding TriggerSubscribers on remote nodes.
 type triggerPublisher struct {
-	config        types.RemoteTriggerConfig
-	underlying    commoncap.TriggerCapability
-	capInfo       commoncap.CapabilityInfo
-	capDonInfo    commoncap.DON
-	workflowDONs  map[string]commoncap.DON
-	dispatcher    types.Dispatcher
-	messageCache  *messageCache[registrationKey, p2ptypes.PeerID]
-	registrations map[registrationKey]*pubRegState
-	mu            sync.RWMutex // protects messageCache and registrations
-	stopCh        services.StopChan
-	wg            sync.WaitGroup
-	lggr          logger.Logger
+	config          *commoncap.RemoteTriggerConfig
+	underlying      commoncap.TriggerCapability
+	capInfo         commoncap.CapabilityInfo
+	capDonInfo      commoncap.DON
+	workflowDONs    map[uint32]commoncap.DON
+	membersCache    map[uint32]map[p2ptypes.PeerID]bool
+	dispatcher      types.Dispatcher
+	messageCache    *messagecache.MessageCache[registrationKey, p2ptypes.PeerID]
+	registrations   map[registrationKey]*pubRegState
+	mu              sync.RWMutex // protects messageCache and registrations
+	batchingQueue   map[[32]byte]*batchedResponse
+	batchingEnabled bool
+	bqMu            sync.Mutex // protects batchingQueue
+	stopCh          services.StopChan
+	wg              sync.WaitGroup
+	lggr            logger.Logger
 }
 
 type registrationKey struct {
-	callerDonId string
-	workflowId  string
+	callerDonID uint32
+	workflowID  string
 }
 
 type pubRegState struct {
-	callback <-chan commoncap.CapabilityResponse
-	request  commoncap.CapabilityRequest
+	callback <-chan commoncap.TriggerResponse
+	request  commoncap.TriggerRegistrationRequest
+	cancel   context.CancelFunc
 }
 
-var _ types.Receiver = &triggerPublisher{}
-var _ services.Service = &triggerPublisher{}
+type batchedResponse struct {
+	rawResponse    []byte
+	callerDonID    uint32
+	triggerEventID string
+	workflowIDs    []string
+}
 
-func NewTriggerPublisher(config types.RemoteTriggerConfig, underlying commoncap.TriggerCapability, capInfo commoncap.CapabilityInfo, capDonInfo commoncap.DON, workflowDONs map[string]commoncap.DON, dispatcher types.Dispatcher, lggr logger.Logger) *triggerPublisher {
+var _ types.ReceiverService = &triggerPublisher{}
+
+const minAllowedBatchCollectionPeriod = 10 * time.Millisecond
+
+func NewTriggerPublisher(config *commoncap.RemoteTriggerConfig, underlying commoncap.TriggerCapability, capInfo commoncap.CapabilityInfo, capDonInfo commoncap.DON, workflowDONs map[uint32]commoncap.DON, dispatcher types.Dispatcher, lggr logger.Logger) *triggerPublisher {
+	if config == nil {
+		lggr.Info("no config provided, using default values")
+		config = &commoncap.RemoteTriggerConfig{}
+	}
 	config.ApplyDefaults()
+	membersCache := make(map[uint32]map[p2ptypes.PeerID]bool)
+	for id, don := range workflowDONs {
+		cache := make(map[p2ptypes.PeerID]bool)
+		for _, member := range don.Members {
+			cache[member] = true
+		}
+		membersCache[id] = cache
+	}
 	return &triggerPublisher{
-		config:        config,
-		underlying:    underlying,
-		capInfo:       capInfo,
-		capDonInfo:    capDonInfo,
-		workflowDONs:  workflowDONs,
-		dispatcher:    dispatcher,
-		messageCache:  NewMessageCache[registrationKey, p2ptypes.PeerID](),
-		registrations: make(map[registrationKey]*pubRegState),
-		stopCh:        make(services.StopChan),
-		lggr:          lggr,
+		config:          config,
+		underlying:      underlying,
+		capInfo:         capInfo,
+		capDonInfo:      capDonInfo,
+		workflowDONs:    workflowDONs,
+		membersCache:    membersCache,
+		dispatcher:      dispatcher,
+		messageCache:    messagecache.NewMessageCache[registrationKey, p2ptypes.PeerID](),
+		registrations:   make(map[registrationKey]*pubRegState),
+		batchingQueue:   make(map[[32]byte]*batchedResponse),
+		batchingEnabled: config.MaxBatchSize > 1 && config.BatchCollectionPeriod >= minAllowedBatchCollectionPeriod,
+		stopCh:          make(services.StopChan),
+		lggr:            logger.Named(lggr, "TriggerPublisher"),
 	}
 }
 
 func (p *triggerPublisher) Start(ctx context.Context) error {
 	p.wg.Add(1)
 	go p.registrationCleanupLoop()
+	if p.batchingEnabled {
+		p.wg.Add(1)
+		go p.batchingLoop()
+	}
 	p.lggr.Info("TriggerPublisher started")
 	return nil
 }
 
-func (p *triggerPublisher) Receive(msg *types.MessageBody) {
-	sender := ToPeerID(msg.Sender)
-	if msg.Method == types.MethodRegisterTrigger {
-		req, err := pb.UnmarshalCapabilityRequest(msg.Payload)
+func (p *triggerPublisher) Receive(_ context.Context, msg *types.MessageBody) {
+	sender, err := ToPeerID(msg.Sender)
+	if err != nil {
+		p.lggr.Errorw("failed to convert message sender to PeerID", "err", err)
+		return
+	}
+
+	if msg.ErrorMsg != "" {
+		p.lggr.Errorw("received a message with error",
+			"method", SanitizeLogString(msg.Method), "sender", sender, "errorMsg", SanitizeLogString(msg.ErrorMsg))
+	}
+
+	switch msg.Method {
+	case types.MethodRegisterTrigger:
+		req, err := pb.UnmarshalTriggerRegistrationRequest(msg.Payload)
 		if err != nil {
-			p.lggr.Errorw("failed to unmarshal capability request", "capabilityId", p.capInfo.ID, "err", err)
+			p.lggr.Errorw("failed to unmarshal trigger registration request", "capabilityId", p.capInfo.ID, "err", err)
 			return
 		}
 		callerDon, ok := p.workflowDONs[msg.CallerDonId]
 		if !ok {
 			p.lggr.Errorw("received a message from unsupported workflow DON", "capabilityId", p.capInfo.ID, "callerDonId", msg.CallerDonId)
+			return
+		}
+		if !p.membersCache[msg.CallerDonId][sender] {
+			p.lggr.Errorw("sender not a member of its workflow DON", "capabilityId", p.capInfo.ID, "callerDonId", msg.CallerDonId, "sender", sender)
+			return
+		}
+		if err = validation.ValidateWorkflowOrExecutionID(req.Metadata.WorkflowID); err != nil {
+			p.lggr.Errorw("received trigger request with invalid workflow ID", "capabilityId", p.capInfo.ID, "workflowId", SanitizeLogString(req.Metadata.WorkflowID), "err", err)
 			return
 		}
 		p.lggr.Debugw("received trigger registration", "capabilityId", p.capInfo.ID, "workflowId", req.Metadata.WorkflowID, "sender", sender)
@@ -97,43 +153,48 @@ func (p *triggerPublisher) Receive(msg *types.MessageBody) {
 		}
 		// NOTE: require 2F+1 by default, introduce different strategies later (KS-76)
 		minRequired := uint32(2*callerDon.F + 1)
-		ready, payloads := p.messageCache.Ready(key, minRequired, nowMs-int64(p.config.RegistrationExpiryMs), false)
+		ready, payloads := p.messageCache.Ready(key, minRequired, nowMs-p.config.RegistrationExpiry.Milliseconds(), false)
 		if !ready {
 			p.lggr.Debugw("not ready to aggregate yet", "capabilityId", p.capInfo.ID, "workflowId", req.Metadata.WorkflowID, "minRequired", minRequired)
 			return
 		}
-		aggregated, err := AggregateModeRaw(payloads, uint32(callerDon.F+1))
+		aggregated, err := aggregation.AggregateModeRaw(payloads, uint32(callerDon.F+1))
 		if err != nil {
 			p.lggr.Errorw("failed to aggregate trigger registrations", "capabilityId", p.capInfo.ID, "workflowId", req.Metadata.WorkflowID, "err", err)
 			return
 		}
-		unmarshaled, err := pb.UnmarshalCapabilityRequest(aggregated)
+		unmarshaled, err := pb.UnmarshalTriggerRegistrationRequest(aggregated)
 		if err != nil {
 			p.lggr.Errorw("failed to unmarshal request", "capabilityId", p.capInfo.ID, "err", err)
 			return
 		}
 		ctx, cancel := p.stopCh.NewCtx()
 		callbackCh, err := p.underlying.RegisterTrigger(ctx, unmarshaled)
-		cancel()
 		if err == nil {
 			p.registrations[key] = &pubRegState{
 				callback: callbackCh,
 				request:  unmarshaled,
+				cancel:   cancel,
 			}
 			p.wg.Add(1)
 			go p.triggerEventLoop(callbackCh, key)
 			p.lggr.Debugw("updated trigger registration", "capabilityId", p.capInfo.ID, "workflowId", req.Metadata.WorkflowID)
 		} else {
+			cancel()
 			p.lggr.Errorw("failed to register trigger", "capabilityId", p.capInfo.ID, "workflowId", req.Metadata.WorkflowID, "err", err)
 		}
-	} else {
-		p.lggr.Errorw("received trigger request with unknown method", "method", msg.Method, "sender", sender)
+	case types.MethodTriggerEvent:
+		p.lggr.Errorw("trigger request failed with error",
+			"method", SanitizeLogString(msg.Method), "sender", sender, "errorMsg", SanitizeLogString(msg.ErrorMsg))
+	default:
+		p.lggr.Errorw("received message with unknown method",
+			"method", SanitizeLogString(msg.Method), "sender", sender)
 	}
 }
 
 func (p *triggerPublisher) registrationCleanupLoop() {
 	defer p.wg.Done()
-	ticker := time.NewTicker(time.Duration(p.config.RegistrationExpiryMs) * time.Millisecond)
+	ticker := time.NewTicker(p.config.RegistrationExpiry)
 	defer ticker.Stop()
 	for {
 		select {
@@ -141,27 +202,28 @@ func (p *triggerPublisher) registrationCleanupLoop() {
 			return
 		case <-ticker.C:
 			now := time.Now().UnixMilli()
-			p.mu.RLock()
+			p.mu.Lock()
 			for key, req := range p.registrations {
-				callerDon := p.workflowDONs[key.callerDonId]
-				ready, _ := p.messageCache.Ready(key, uint32(2*callerDon.F+1), now-int64(p.config.RegistrationExpiryMs), false)
+				callerDon := p.workflowDONs[key.callerDonID]
+				ready, _ := p.messageCache.Ready(key, uint32(2*callerDon.F+1), now-p.config.RegistrationExpiry.Milliseconds(), false)
 				if !ready {
-					p.lggr.Infow("trigger registration expired", "capabilityId", p.capInfo.ID, "callerDonID", key.callerDonId, "workflowId", key.workflowId)
+					p.lggr.Infow("trigger registration expired", "capabilityId", p.capInfo.ID, "callerDonID", key.callerDonID, "workflowId", key.workflowID)
 					ctx, cancel := p.stopCh.NewCtx()
 					err := p.underlying.UnregisterTrigger(ctx, req.request)
 					cancel()
-					p.lggr.Infow("unregistered trigger", "capabilityId", p.capInfo.ID, "callerDonID", key.callerDonId, "workflowId", key.workflowId, "err", err)
+					p.registrations[key].cancel() // Cancel context on register trigger
+					p.lggr.Infow("unregistered trigger", "capabilityId", p.capInfo.ID, "callerDonID", key.callerDonID, "workflowId", key.workflowID, "err", err)
 					// after calling UnregisterTrigger, the underlying trigger will not send any more events to the channel
 					delete(p.registrations, key)
 					p.messageCache.Delete(key)
 				}
 			}
-			p.mu.RUnlock()
+			p.mu.Unlock()
 		}
 	}
 }
 
-func (p *triggerPublisher) triggerEventLoop(callbackCh <-chan commoncap.CapabilityResponse, key registrationKey) {
+func (p *triggerPublisher) triggerEventLoop(callbackCh <-chan commoncap.TriggerResponse, key registrationKey) {
 	defer p.wg.Done()
 	for {
 		select {
@@ -169,41 +231,103 @@ func (p *triggerPublisher) triggerEventLoop(callbackCh <-chan commoncap.Capabili
 			return
 		case response, ok := <-callbackCh:
 			if !ok {
-				p.lggr.Infow("triggerEventLoop channel closed", "capabilityId", p.capInfo.ID, "workflowId", key.workflowId)
+				p.lggr.Infow("triggerEventLoop channel closed", "capabilityId", p.capInfo.ID, "workflowId", key.workflowID)
 				return
 			}
-			triggerEvent := capabilities.TriggerEvent{}
-			err := response.Value.UnwrapTo(&triggerEvent)
-			if err != nil {
-				p.lggr.Errorw("can't unwrap trigger event", "capabilityId", p.capInfo.ID, "workflowId", key.workflowId, "err", err)
-				break
-			}
-			p.lggr.Debugw("received trigger event", "capabilityId", p.capInfo.ID, "workflowId", key.workflowId, "triggerEventID", triggerEvent.ID)
-			marshaled, err := pb.MarshalCapabilityResponse(response)
+			triggerEvent := response.Event
+			p.lggr.Debugw("received trigger event", "capabilityId", p.capInfo.ID, "workflowId", key.workflowID, "triggerEventID", triggerEvent.ID)
+			marshaledResponse, err := pb.MarshalTriggerResponse(response)
 			if err != nil {
 				p.lggr.Debugw("can't marshal trigger event", "err", err)
 				break
 			}
-			msg := &types.MessageBody{
-				CapabilityId:    p.capInfo.ID,
-				CapabilityDonId: p.capDonInfo.ID,
-				CallerDonId:     key.callerDonId,
-				Method:          types.MethodTriggerEvent,
-				Payload:         marshaled,
-				Metadata: &types.MessageBody_TriggerEventMetadata{
-					TriggerEventMetadata: &types.TriggerEventMetadata{
-						// NOTE: optionally introduce batching across workflows as an optimization
-						WorkflowIds:    []string{key.workflowId},
-						TriggerEventId: triggerEvent.ID,
-					},
-				},
+
+			if p.batchingEnabled {
+				p.enqueueForBatching(marshaledResponse, key, triggerEvent.ID)
+			} else {
+				// a single-element "batch"
+				p.sendBatch(&batchedResponse{
+					rawResponse:    marshaledResponse,
+					callerDonID:    key.callerDonID,
+					triggerEventID: triggerEvent.ID,
+					workflowIDs:    []string{key.workflowID},
+				})
 			}
-			// NOTE: send to all nodes by default, introduce different strategies later (KS-76)
-			for _, peerID := range p.workflowDONs[key.callerDonId].Members {
-				err = p.dispatcher.Send(peerID, msg)
-				if err != nil {
-					p.lggr.Errorw("failed to send trigger event", "capabilityId", p.capInfo.ID, "peerID", peerID, "err", err)
-				}
+		}
+	}
+}
+
+func (p *triggerPublisher) enqueueForBatching(rawResponse []byte, key registrationKey, triggerEventID string) {
+	// put in batching queue, group by hash(callerDonId, triggerEventID, response)
+	combined := make([]byte, 4)
+	binary.LittleEndian.PutUint32(combined, key.callerDonID)
+	combined = append(combined, []byte(triggerEventID)...)
+	combined = append(combined, rawResponse...)
+	sha := sha256.Sum256(combined)
+	p.bqMu.Lock()
+	elem, exists := p.batchingQueue[sha]
+	if !exists {
+		elem = &batchedResponse{
+			rawResponse:    rawResponse,
+			callerDonID:    key.callerDonID,
+			triggerEventID: triggerEventID,
+			workflowIDs:    []string{key.workflowID},
+		}
+		p.batchingQueue[sha] = elem
+	} else {
+		elem.workflowIDs = append(elem.workflowIDs, key.workflowID)
+	}
+	p.bqMu.Unlock()
+}
+
+func (p *triggerPublisher) sendBatch(resp *batchedResponse) {
+	for len(resp.workflowIDs) > 0 {
+		idBatch := resp.workflowIDs
+		if p.batchingEnabled && int64(len(idBatch)) > int64(p.config.MaxBatchSize) {
+			idBatch = idBatch[:p.config.MaxBatchSize]
+			resp.workflowIDs = resp.workflowIDs[p.config.MaxBatchSize:]
+		} else {
+			resp.workflowIDs = nil
+		}
+		msg := &types.MessageBody{
+			CapabilityId:    p.capInfo.ID,
+			CapabilityDonId: p.capDonInfo.ID,
+			CallerDonId:     resp.callerDonID,
+			Method:          types.MethodTriggerEvent,
+			Payload:         resp.rawResponse,
+			Metadata: &types.MessageBody_TriggerEventMetadata{
+				TriggerEventMetadata: &types.TriggerEventMetadata{
+					WorkflowIds:    idBatch,
+					TriggerEventId: resp.triggerEventID,
+				},
+			},
+		}
+		// NOTE: send to all nodes by default, introduce different strategies later (KS-76)
+		for _, peerID := range p.workflowDONs[resp.callerDonID].Members {
+			err := p.dispatcher.Send(peerID, msg)
+			if err != nil {
+				p.lggr.Errorw("failed to send trigger event", "capabilityId", p.capInfo.ID, "peerID", peerID, "err", err)
+			}
+		}
+	}
+}
+
+func (p *triggerPublisher) batchingLoop() {
+	defer p.wg.Done()
+	ticker := time.NewTicker(p.config.BatchCollectionPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-ticker.C:
+			p.bqMu.Lock()
+			queue := p.batchingQueue
+			p.batchingQueue = make(map[[32]byte]*batchedResponse)
+			p.bqMu.Unlock()
+
+			for _, elem := range queue {
+				p.sendBatch(elem)
 			}
 		}
 	}
@@ -225,5 +349,5 @@ func (p *triggerPublisher) HealthReport() map[string]error {
 }
 
 func (p *triggerPublisher) Name() string {
-	return "TriggerPublisher"
+	return p.lggr.Name()
 }

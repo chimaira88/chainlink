@@ -4,27 +4,41 @@ set +e
 
 SCRIPT_PATH=`dirname "$0"`; SCRIPT_PATH=`eval "cd \"$SCRIPT_PATH\" && pwd"`
 OUTPUT_FILE=${OUTPUT_FILE:-"./output.txt"}
-USE_TEE="${USE_TEE:-true}"
+EXTRA_FLAGS="-timeout 16m"
 
-echo "Failed tests and panics: ---------------------"
-echo ""
-GO_LDFLAGS=$(bash tools/bin/ldflags)
-use_tee() {
-  if [ "$USE_TEE" = "true" ]; then
-    tee "$@"
-  else
-    cat > "$@"
+echo "Running go_core_tests for event: $GITHUB_EVENT_NAME"
+
+if [[ "$GITHUB_EVENT_NAME" == 'pull_request' || "$GITHUB_EVENT_NAME" == "merge_group" || "$GITHUB_EVENT_NAME" == "push" ]]; then
+  go install gotest.tools/gotestsum@v1.12.3
+  PATH=$PATH:$(go env GOPATH)/bin
+  export PATH
+
+  gotestsum \
+    --format='standard-quiet' \
+    --rerun-fails-abort-on-data-race \
+    --rerun-fails='3' \
+    --packages='./...' \
+    --jsonfile "$OUTPUT_FILE"
+
+  EXITCODE=${PIPESTATUS[0]}
+else
+  if [[ $GITHUB_EVENT_NAME == "schedule" ]]; then
+    EXTRA_FLAGS="-covermode=atomic -coverpkg=./... -coverprofile=coverage.txt"
   fi
-}
-go test -json -ldflags "$GO_LDFLAGS" -tags integration $TEST_FLAGS -covermode=atomic -coverpkg=./... -coverprofile=coverage.txt $1 | use_tee $OUTPUT_FILE
-EXITCODE=${PIPESTATUS[0]}
 
-# Assert no known sensitive strings present in test logger output
-printf "\n----------------------------------------------\n\n"
-echo "Beginning check of output logs for sensitive strings"
-$SCRIPT_PATH/scrub_logs $OUTPUT_FILE
-if [[ $? != 0 ]]; then
-  exit 1
+  echo "Test execution results: ---------------------"
+  echo ""
+
+  go test $EXTRA_FLAGS $1 | tee "$OUTPUT_FILE" | grep -Ev '\[no test files\]|\[no tests to run\]'
+  EXITCODE=${PIPESTATUS[0]}
+
+  # Assert no known sensitive strings present in test logger output
+  printf "\n----------------------------------------------\n\n"
+  echo "Beginning check of output logs for sensitive strings"
+  $SCRIPT_PATH/scrub_logs $OUTPUT_FILE
+  if [[ $? != 0 ]]; then
+    exit 1
+  fi
 fi
 
 echo "Exit code: $EXITCODE"

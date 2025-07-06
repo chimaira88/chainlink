@@ -15,11 +15,12 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas"
-	httypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/headtracker/types"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	evmclient "github.com/smartcontractkit/chainlink-evm/pkg/client"
+	"github.com/smartcontractkit/chainlink-evm/pkg/gas"
+	"github.com/smartcontractkit/chainlink-evm/pkg/heads"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
+
 	"github.com/smartcontractkit/chainlink/v2/core/config"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
@@ -33,8 +34,8 @@ const (
 
 // UpkeepExecuter fulfills Service and HeadTrackable interfaces
 var (
-	_ job.ServiceCtx        = (*UpkeepExecuter)(nil)
-	_ httypes.HeadTrackable = (*UpkeepExecuter)(nil)
+	_ job.ServiceCtx  = (*UpkeepExecuter)(nil)
+	_ heads.Trackable = (*UpkeepExecuter)(nil)
 )
 
 var (
@@ -59,7 +60,7 @@ type UpkeepExecuter struct {
 	ethClient              evmclient.Client
 	config                 UpkeepExecuterConfig
 	executionQueue         chan struct{}
-	headBroadcaster        httypes.HeadBroadcaster
+	headBroadcaster        heads.Broadcaster
 	gasEstimator           gas.EvmFeeEstimator
 	job                    job.Job
 	mailbox                *mailbox.Mailbox[*evmtypes.Head]
@@ -76,7 +77,7 @@ func NewUpkeepExecuter(
 	orm *ORM,
 	pr pipeline.Runner,
 	ethClient evmclient.Client,
-	headBroadcaster httypes.HeadBroadcaster,
+	headBroadcaster heads.Broadcaster,
 	gasEstimator gas.EvmFeeEstimator,
 	logger logger.Logger,
 	config UpkeepExecuterConfig,
@@ -162,7 +163,7 @@ func (ex *UpkeepExecuter) processActiveUpkeeps(ctx context.Context) {
 	}
 
 	var activeUpkeeps []UpkeepRegistration
-	turnBinary, err2 := ex.turnBlockHashBinary(registry, head, ex.config.TurnLookBack())
+	turnBinary, err2 := ex.turnBlockHashBinary(ctx, registry, head, ex.config.TurnLookBack())
 	if err2 != nil {
 		ex.logger.Error(errors.Wrap(err2, "unable to get turn block number hash"))
 		return
@@ -210,7 +211,7 @@ func (ex *UpkeepExecuter) execute(upkeep UpkeepRegistration, head *evmtypes.Head
 	svcLogger := ex.logger.With("jobID", ex.job.ID, "blockNum", head.Number, "upkeepID", upkeep.UpkeepID)
 	svcLogger.Debugw("checking upkeep", "lastRunBlockHeight", upkeep.LastRunBlockHeight, "lastKeeperIndex", upkeep.LastKeeperIndex)
 
-	ctxService, cancel := ex.chStop.CtxCancel(context.WithTimeout(context.Background(), time.Minute))
+	ctxService, cancel := ex.chStop.CtxWithTimeout(time.Minute)
 	defer cancel()
 
 	evmChainID := ""
@@ -227,7 +228,7 @@ func (ex *UpkeepExecuter) execute(upkeep UpkeepRegistration, head *evmtypes.Head
 	ex.job.PipelineSpec.DotDagSource = pipeline.KeepersObservationSource
 	run := pipeline.NewRun(*ex.job.PipelineSpec, vars)
 
-	if _, err := ex.pr.Run(ctxService, run, svcLogger, true, nil); err != nil {
+	if _, err := ex.pr.Run(ctxService, run, true, nil); err != nil {
 		svcLogger.Error(errors.Wrap(err, "failed executing run"))
 		return
 	}
@@ -247,9 +248,9 @@ func (ex *UpkeepExecuter) execute(upkeep UpkeepRegistration, head *evmtypes.Head
 	}
 }
 
-func (ex *UpkeepExecuter) turnBlockHashBinary(registry Registry, head *evmtypes.Head, lookback int64) (string, error) {
+func (ex *UpkeepExecuter) turnBlockHashBinary(ctx context.Context, registry Registry, head *evmtypes.Head, lookback int64) (string, error) {
 	turnBlock := head.Number - (head.Number % int64(registry.BlockCountPerTurn)) - lookback
-	block, err := ex.ethClient.HeadByNumber(context.Background(), big.NewInt(turnBlock))
+	block, err := ex.ethClient.HeadByNumber(ctx, big.NewInt(turnBlock))
 	if err != nil {
 		return "", err
 	}

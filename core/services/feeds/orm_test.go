@@ -23,7 +23,6 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
-	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 	"github.com/smartcontractkit/chainlink/v2/core/testdata/testspecs"
 	"github.com/smartcontractkit/chainlink/v2/core/utils/crypto"
 )
@@ -45,7 +44,7 @@ func setupORM(t *testing.T) *TestORM {
 
 	var (
 		db  = pgtest.NewSqlxDB(t)
-		orm = feeds.NewORM(db)
+		orm = feeds.NewORM(db, logger.TestLogger(t))
 	)
 
 	return &TestORM{ORM: orm, db: db}
@@ -53,7 +52,7 @@ func setupORM(t *testing.T) *TestORM {
 
 // Managers
 
-func Test_ORM_CreateManager(t *testing.T) {
+func Test_ORM_CreateManager_CountManagers(t *testing.T) {
 	t.Parallel()
 	ctx := testutils.Context(t)
 
@@ -76,6 +75,33 @@ func Test_ORM_CreateManager(t *testing.T) {
 	count, err = orm.CountManagers(ctx)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), count)
+
+	assert.NotZero(t, id)
+}
+
+func Test_ORM_CreateManager(t *testing.T) {
+	t.Parallel()
+	ctx := testutils.Context(t)
+
+	var (
+		orm = setupORM(t)
+		mgr = &feeds.FeedsManager{
+			URI:       uri,
+			Name:      name,
+			PublicKey: publicKey,
+		}
+	)
+
+	exists, err := orm.ManagerExists(ctx, publicKey)
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	id, err := orm.CreateManager(ctx, mgr)
+	require.NoError(t, err)
+
+	exists, err = orm.ManagerExists(ctx, publicKey)
+	require.NoError(t, err)
+	require.True(t, exists)
 
 	assert.NotZero(t, id)
 }
@@ -103,6 +129,7 @@ func Test_ORM_GetManager(t *testing.T) {
 	assert.Equal(t, uri, actual.URI)
 	assert.Equal(t, name, actual.Name)
 	assert.Equal(t, publicKey, actual.PublicKey)
+	assert.Nil(t, actual.DisabledAt)
 
 	_, err = orm.GetManager(ctx, -1)
 	require.Error(t, err)
@@ -133,6 +160,7 @@ func Test_ORM_ListManagers(t *testing.T) {
 	assert.Equal(t, uri, actual.URI)
 	assert.Equal(t, name, actual.Name)
 	assert.Equal(t, publicKey, actual.PublicKey)
+	assert.Nil(t, actual.DisabledAt)
 }
 
 func Test_ORM_ListManagersByIDs(t *testing.T) {
@@ -153,13 +181,14 @@ func Test_ORM_ListManagersByIDs(t *testing.T) {
 
 	mgrs, err := orm.ListManagersByIDs(ctx, []int64{id})
 	require.NoError(t, err)
-	require.Equal(t, 1, len(mgrs))
+	require.Len(t, mgrs, 1)
 
 	actual := mgrs[0]
 	assert.Equal(t, id, actual.ID)
 	assert.Equal(t, uri, actual.URI)
 	assert.Equal(t, name, actual.Name)
 	assert.Equal(t, publicKey, actual.PublicKey)
+	assert.Nil(t, actual.DisabledAt)
 }
 
 func Test_ORM_UpdateManager(t *testing.T) {
@@ -196,6 +225,34 @@ func Test_ORM_UpdateManager(t *testing.T) {
 	assert.Equal(t, updatedMgr.PublicKey, actual.PublicKey)
 }
 
+func Test_ORM_EnableAndDisableManager(t *testing.T) {
+	t.Parallel()
+	ctx := testutils.Context(t)
+
+	var (
+		orm = setupORM(t)
+		mgr = &feeds.FeedsManager{
+			URI:       uri,
+			Name:      name,
+			PublicKey: publicKey,
+		}
+	)
+	id, err := orm.CreateManager(ctx, mgr)
+	require.NoError(t, err)
+
+	mgr, err = orm.GetManager(ctx, id)
+	require.NoError(t, err)
+	require.Nil(t, mgr.DisabledAt)
+
+	mgr, err = orm.DisableManager(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, mgr.DisabledAt)
+
+	mgr, err = orm.EnableManager(ctx, id)
+	require.NoError(t, err)
+	require.Nil(t, mgr.DisabledAt)
+}
+
 // Chain Config
 
 func Test_ORM_CreateChainConfig(t *testing.T) {
@@ -206,11 +263,12 @@ func Test_ORM_CreateChainConfig(t *testing.T) {
 		orm  = setupORM(t)
 		fmID = createFeedsManager(t, orm)
 		cfg1 = feeds.ChainConfig{
-			FeedsManagerID: fmID,
-			ChainID:        "1",
-			ChainType:      feeds.ChainTypeEVM,
-			AccountAddress: "0x0001",
-			AdminAddress:   "0x1001",
+			FeedsManagerID:          fmID,
+			ChainID:                 "1",
+			ChainType:               feeds.ChainTypeEVM,
+			AccountAddress:          "0x0001",
+			AdminAddress:            "0x1001",
+			AccountAddressPublicKey: null.StringFrom("0x0002"),
 			FluxMonitorConfig: feeds.FluxMonitorConfig{
 				Enabled: true,
 			},
@@ -235,14 +293,15 @@ func Test_ORM_CreateChainConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	assertChainConfigEqual(t, map[string]interface{}{
-		"feedsManagerID":    cfg1.FeedsManagerID,
-		"chainID":           cfg1.ChainID,
-		"chainType":         cfg1.ChainType,
-		"accountAddress":    cfg1.AccountAddress,
-		"adminAddress":      cfg1.AdminAddress,
-		"fluxMonitorConfig": cfg1.FluxMonitorConfig,
-		"ocrConfig":         cfg1.OCR1Config,
-		"ocr2Config":        cfg1.OCR2Config,
+		"feedsManagerID":          cfg1.FeedsManagerID,
+		"chainID":                 cfg1.ChainID,
+		"chainType":               cfg1.ChainType,
+		"accountAddress":          cfg1.AccountAddress,
+		"accountAddressPublicKey": cfg1.AccountAddressPublicKey,
+		"adminAddress":            cfg1.AdminAddress,
+		"fluxMonitorConfig":       cfg1.FluxMonitorConfig,
+		"ocrConfig":               cfg1.OCR1Config,
+		"ocr2Config":              cfg1.OCR2Config,
 	}, *actual)
 }
 
@@ -254,11 +313,12 @@ func Test_ORM_CreateBatchChainConfig(t *testing.T) {
 		orm  = setupORM(t)
 		fmID = createFeedsManager(t, orm)
 		cfg1 = feeds.ChainConfig{
-			FeedsManagerID: fmID,
-			ChainID:        "1",
-			ChainType:      feeds.ChainTypeEVM,
-			AccountAddress: "0x0001",
-			AdminAddress:   "0x1001",
+			FeedsManagerID:          fmID,
+			ChainID:                 "1",
+			ChainType:               feeds.ChainTypeEVM,
+			AccountAddress:          "0x0001",
+			AccountAddressPublicKey: null.StringFrom("0x0002"),
+			AdminAddress:            "0x1001",
 		}
 		cfg2 = feeds.ChainConfig{
 			FeedsManagerID: fmID,
@@ -278,14 +338,15 @@ func Test_ORM_CreateBatchChainConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	assertChainConfigEqual(t, map[string]interface{}{
-		"feedsManagerID":    cfg1.FeedsManagerID,
-		"chainID":           cfg1.ChainID,
-		"chainType":         cfg1.ChainType,
-		"accountAddress":    cfg1.AccountAddress,
-		"adminAddress":      cfg1.AdminAddress,
-		"fluxMonitorConfig": cfg1.FluxMonitorConfig,
-		"ocrConfig":         cfg1.OCR1Config,
-		"ocr2Config":        cfg1.OCR2Config,
+		"feedsManagerID":          cfg1.FeedsManagerID,
+		"chainID":                 cfg1.ChainID,
+		"chainType":               cfg1.ChainType,
+		"accountAddress":          cfg1.AccountAddress,
+		"accountAddressPublicKey": cfg1.AccountAddressPublicKey,
+		"adminAddress":            cfg1.AdminAddress,
+		"fluxMonitorConfig":       cfg1.FluxMonitorConfig,
+		"ocrConfig":               cfg1.OCR1Config,
+		"ocr2Config":              cfg1.OCR2Config,
 	}, *actual)
 
 	actual, err = orm.GetChainConfig(ctx, ids[1])
@@ -346,11 +407,12 @@ func Test_ORM_ListChainConfigsByManagerIDs(t *testing.T) {
 		orm  = setupORM(t)
 		fmID = createFeedsManager(t, orm)
 		cfg1 = feeds.ChainConfig{
-			FeedsManagerID: fmID,
-			ChainID:        "1",
-			ChainType:      feeds.ChainTypeEVM,
-			AccountAddress: "0x0001",
-			AdminAddress:   "0x1001",
+			FeedsManagerID:          fmID,
+			ChainID:                 "1",
+			ChainType:               feeds.ChainTypeEVM,
+			AccountAddress:          "0x0001",
+			AccountAddressPublicKey: null.StringFrom("0x0002"),
+			AdminAddress:            "0x1001",
 			FluxMonitorConfig: feeds.FluxMonitorConfig{
 				Enabled: true,
 			},
@@ -376,14 +438,15 @@ func Test_ORM_ListChainConfigsByManagerIDs(t *testing.T) {
 	require.Len(t, actual, 1)
 
 	assertChainConfigEqual(t, map[string]interface{}{
-		"feedsManagerID":    cfg1.FeedsManagerID,
-		"chainID":           cfg1.ChainID,
-		"chainType":         cfg1.ChainType,
-		"accountAddress":    cfg1.AccountAddress,
-		"adminAddress":      cfg1.AdminAddress,
-		"fluxMonitorConfig": cfg1.FluxMonitorConfig,
-		"ocrConfig":         cfg1.OCR1Config,
-		"ocr2Config":        cfg1.OCR2Config,
+		"feedsManagerID":          cfg1.FeedsManagerID,
+		"chainID":                 cfg1.ChainID,
+		"chainType":               cfg1.ChainType,
+		"accountAddress":          cfg1.AccountAddress,
+		"accountAddressPublicKey": cfg1.AccountAddressPublicKey,
+		"adminAddress":            cfg1.AdminAddress,
+		"fluxMonitorConfig":       cfg1.FluxMonitorConfig,
+		"ocrConfig":               cfg1.OCR1Config,
+		"ocr2Config":              cfg1.OCR2Config,
 	}, actual[0])
 }
 
@@ -395,19 +458,21 @@ func Test_ORM_UpdateChainConfig(t *testing.T) {
 		orm  = setupORM(t)
 		fmID = createFeedsManager(t, orm)
 		cfg1 = feeds.ChainConfig{
-			FeedsManagerID:    fmID,
-			ChainID:           "1",
-			ChainType:         feeds.ChainTypeEVM,
-			AccountAddress:    "0x0001",
-			AdminAddress:      "0x1001",
-			FluxMonitorConfig: feeds.FluxMonitorConfig{Enabled: false},
-			OCR1Config:        feeds.OCR1Config{Enabled: false},
-			OCR2Config:        feeds.OCR2ConfigModel{Enabled: false},
+			FeedsManagerID:          fmID,
+			ChainID:                 "1",
+			ChainType:               feeds.ChainTypeEVM,
+			AccountAddress:          "0x0001",
+			AccountAddressPublicKey: null.NewString("", false),
+			AdminAddress:            "0x1001",
+			FluxMonitorConfig:       feeds.FluxMonitorConfig{Enabled: false},
+			OCR1Config:              feeds.OCR1Config{Enabled: false},
+			OCR2Config:              feeds.OCR2ConfigModel{Enabled: false},
 		}
 		updateCfg = feeds.ChainConfig{
-			AccountAddress:    "0x0002",
-			AdminAddress:      "0x1002",
-			FluxMonitorConfig: feeds.FluxMonitorConfig{Enabled: true},
+			AccountAddress:          "0x0002",
+			AdminAddress:            "0x1002",
+			AccountAddressPublicKey: null.StringFrom("0x0002"),
+			FluxMonitorConfig:       feeds.FluxMonitorConfig{Enabled: true},
 			OCR1Config: feeds.OCR1Config{
 				Enabled:     true,
 				IsBootstrap: false,
@@ -434,14 +499,15 @@ func Test_ORM_UpdateChainConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	assertChainConfigEqual(t, map[string]interface{}{
-		"feedsManagerID":    cfg1.FeedsManagerID,
-		"chainID":           cfg1.ChainID,
-		"chainType":         cfg1.ChainType,
-		"accountAddress":    updateCfg.AccountAddress,
-		"adminAddress":      updateCfg.AdminAddress,
-		"fluxMonitorConfig": updateCfg.FluxMonitorConfig,
-		"ocrConfig":         updateCfg.OCR1Config,
-		"ocr2Config":        updateCfg.OCR2Config,
+		"feedsManagerID":          cfg1.FeedsManagerID,
+		"chainID":                 cfg1.ChainID,
+		"chainType":               cfg1.ChainType,
+		"accountAddress":          updateCfg.AccountAddress,
+		"accountAddressPublicKey": updateCfg.AccountAddressPublicKey,
+		"adminAddress":            updateCfg.AdminAddress,
+		"fluxMonitorConfig":       updateCfg.FluxMonitorConfig,
+		"ocrConfig":               updateCfg.OCR1Config,
+		"ocr2Config":              updateCfg.OCR2Config,
 	}, *actual)
 }
 
@@ -546,39 +612,6 @@ func Test_ORM_GetJobProposal(t *testing.T) {
 	})
 }
 
-func Test_ORM_ListJobProposals(t *testing.T) {
-	t.Parallel()
-	ctx := testutils.Context(t)
-
-	orm := setupORM(t)
-	fmID := createFeedsManager(t, orm)
-	uuid := uuid.New()
-	name := null.StringFrom("jp1")
-
-	jp := &feeds.JobProposal{
-		Name:           name,
-		RemoteUUID:     uuid,
-		Status:         feeds.JobProposalStatusPending,
-		FeedsManagerID: fmID,
-	}
-
-	id, err := orm.CreateJobProposal(ctx, jp)
-	require.NoError(t, err)
-
-	jps, err := orm.ListJobProposals(ctx)
-	require.NoError(t, err)
-	require.Len(t, jps, 1)
-
-	actual := jps[0]
-	assert.Equal(t, id, actual.ID)
-	assert.Equal(t, name, actual.Name)
-	assert.Equal(t, uuid, actual.RemoteUUID)
-	assert.Equal(t, jp.Status, actual.Status)
-	assert.False(t, actual.ExternalJobID.Valid)
-	assert.False(t, actual.PendingUpdate)
-	assert.Equal(t, jp.FeedsManagerID, actual.FeedsManagerID)
-}
-
 func Test_ORM_CountJobProposalsByStatus(t *testing.T) {
 	t.Parallel()
 
@@ -641,7 +674,7 @@ func Test_ORM_CountJobProposalsByStatus(t *testing.T) {
 				// Assert that the upserted job proposal is now pending update.
 				jp, err := orm.GetJobProposal(ctx, jpID)
 				require.NoError(t, err)
-				assert.Equal(t, true, jp.PendingUpdate)
+				assert.True(t, jp.PendingUpdate)
 
 				counts, err := orm.CountJobProposalsByStatus(ctx)
 				require.NoError(t, err)
@@ -1650,6 +1683,14 @@ func Test_ORM_IsJobManaged(t *testing.T) {
 	isManaged, err = orm.IsJobManaged(ctx, int64(j.ID))
 	require.NoError(t, err)
 	assert.True(t, isManaged)
+
+	// delete the proposal
+	err = orm.DeleteProposal(ctx, jpID)
+	require.NoError(t, err)
+
+	isManaged, err = orm.IsJobManaged(ctx, int64(j.ID))
+	require.NoError(t, err)
+	assert.False(t, isManaged)
 }
 
 // Helpers
@@ -1689,12 +1730,19 @@ func createJob(t *testing.T, db *sqlx.DB, externalJobID uuid.UUID) *job.Job {
 	ctx := testutils.Context(t)
 
 	var (
-		config         = configtest.NewGeneralConfig(t, nil)
-		keyStore       = cltest.NewKeyStore(t, db)
-		lggr           = logger.TestLogger(t)
-		pipelineORM    = pipeline.NewORM(db, lggr, config.JobPipeline().MaxSuccessfulRuns())
-		bridgeORM      = bridges.NewORM(db)
-		relayExtenders = evmtest.NewChainRelayExtenders(t, evmtest.TestChainOpts{DB: db, GeneralConfig: config, KeyStore: keyStore.Eth()})
+		config       = configtest.NewGeneralConfig(t, nil)
+		keyStore     = cltest.NewKeyStore(t, db)
+		lggr         = logger.TestLogger(t)
+		pipelineORM  = pipeline.NewORM(db, lggr, config.JobPipeline().MaxSuccessfulRuns())
+		bridgeORM    = bridges.NewORM(db)
+		legacyChains = evmtest.NewLegacyChains(t, evmtest.TestChainOpts{
+			ChainConfigs:   config.EVMConfigs(),
+			DatabaseConfig: config.Database(),
+			FeatureConfig:  config.Feature(),
+			ListenerConfig: config.Database().Listener(),
+			DB:             db,
+			KeyStore:       keyStore.Eth(),
+		})
 	)
 	orm := job.NewORM(db, pipelineORM, bridgeORM, keyStore, lggr)
 	require.NoError(t, keyStore.OCR().Add(ctx, cltest.DefaultOCRKey))
@@ -1706,7 +1754,6 @@ func createJob(t *testing.T, db *sqlx.DB, externalJobID uuid.UUID) *job.Job {
 	_, bridge2 := cltest.MustCreateBridge(t, db, cltest.BridgeOpts{})
 
 	_, address := cltest.MustInsertRandomKey(t, keyStore.Eth())
-	legacyChains := evmrelay.NewLegacyChainsFromRelayerExtenders(relayExtenders)
 	jb, err := ocr.ValidatedOracleSpecToml(config, legacyChains,
 		testspecs.GenerateOCRSpec(testspecs.OCRSpecParams{
 			JobID:              externalJobID.String(),

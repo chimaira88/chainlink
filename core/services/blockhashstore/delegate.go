@@ -3,6 +3,7 @@ package blockhashstore
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"sync"
 	"time"
@@ -10,18 +11,18 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/blockhash_store"
+	v1 "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/solidity_vrf_coordinator_interface"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/trusted_blockhash_store"
+	v2 "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrf_coordinator_v2"
+	v2plus "github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/vrf_coordinator_v2plus_interface"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/keys"
+	"github.com/smartcontractkit/chainlink-evm/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/config"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/blockhash_store"
-	v1 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/solidity_vrf_coordinator_interface"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/trusted_blockhash_store"
-	v2 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_coordinator_v2"
-	v2plus "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_coordinator_v2plus_interface"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
 var _ job.ServiceCtx = &service{}
@@ -71,24 +72,31 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) ([]job.Servi
 	}
 	d.logger.Debugw("Creating services for job spec", "job", string(marshalledJob))
 
-	chain, err := d.legacyChains.Get(jb.BlockhashStoreSpec.EVMChainID.String())
+	cid := jb.BlockhashStoreSpec.EVMChainID.ToInt()
+	chainService, err := d.legacyChains.Get(cid.String())
 	if err != nil {
 		return nil, fmt.Errorf(
-			"getting chain ID %d: %w", jb.BlockhashStoreSpec.EVMChainID.ToInt(), err)
+			"getting chain ID %s: %w", cid, err)
+	}
+	chain, ok := chainService.(legacyevm.Chain)
+	if !ok {
+		return nil, fmt.Errorf("blockhashstore is not available in LOOP Plugin mode: %w", stderrors.ErrUnsupported)
 	}
 
 	if !d.cfg.Feature().LogPoller() {
 		return nil, errors.New("log poller must be enabled to run blockhashstore")
 	}
 
-	keys, err := d.ks.EnabledKeysForChain(ctx, chain.ID())
+	ks := keys.NewChainStore(keystore.NewEthSigner(d.ks, cid), cid)
+
+	enabled, err := ks.EnabledAddresses(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "getting sending keys")
 	}
-	if len(keys) == 0 {
+	if len(enabled) == 0 {
 		return nil, fmt.Errorf("missing sending keys for chain ID: %v", chain.ID())
 	}
-	fromAddresses := []types.EIP55Address{keys[0].EIP55Address}
+	fromAddresses := []types.EIP55Address{types.EIP55AddressFromAddress(enabled[0])}
 	if jb.BlockhashStoreSpec.FromAddresses != nil {
 		fromAddresses = jb.BlockhashStoreSpec.FromAddresses
 	}
@@ -116,7 +124,6 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) ([]job.Servi
 		var c *v1.VRFCoordinator
 		if c, err = v1.NewVRFCoordinator(
 			jb.BlockhashStoreSpec.CoordinatorV1Address.Address(), chain.Client()); err != nil {
-
 			return nil, errors.Wrap(err, "building V1 coordinator")
 		}
 
@@ -131,7 +138,6 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) ([]job.Servi
 		var c *v2.VRFCoordinatorV2
 		if c, err = v2.NewVRFCoordinatorV2(
 			jb.BlockhashStoreSpec.CoordinatorV2Address.Address(), chain.Client()); err != nil {
-
 			return nil, errors.Wrap(err, "building V2 coordinator")
 		}
 
@@ -146,7 +152,6 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) ([]job.Servi
 		var c v2plus.IVRFCoordinatorV2PlusInternalInterface
 		if c, err = v2plus.NewIVRFCoordinatorV2PlusInternal(
 			jb.BlockhashStoreSpec.CoordinatorV2PlusAddress.Address(), chain.Client()); err != nil {
-
 			return nil, errors.Wrap(err, "building V2Plus coordinator")
 		}
 
@@ -165,8 +170,7 @@ func (d *Delegate) ServicesForSpec(ctx context.Context, jb job.Job) ([]job.Servi
 		chain.TxManager(),
 		bhs,
 		trustedBHS,
-		chain.ID(),
-		d.ks,
+		ks,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "building bulletproof bhs")
@@ -218,29 +222,32 @@ type service struct {
 	pollPeriod time.Duration
 	runTimeout time.Duration
 	logger     logger.Logger
-	parentCtx  context.Context
-	cancel     context.CancelFunc
+	stopCh     services.StopChan
 }
 
 // Start the BHS feeder service, satisfying the job.Service interface.
 func (s *service) Start(context.Context) error {
 	return s.StartOnce("BHS Feeder Service", func() error {
 		s.logger.Infow("Starting BHS feeder")
-		ticker := time.NewTicker(utils.WithJitter(s.pollPeriod))
-		s.parentCtx, s.cancel = context.WithCancel(context.Background())
+		s.stopCh = make(chan struct{})
 		s.wg.Add(2)
 		go func() {
 			defer s.wg.Done()
-			s.feeder.StartHeartbeats(s.parentCtx, &realTimer{})
+			ctx, cancel := s.stopCh.NewCtx()
+			defer cancel()
+			s.feeder.StartHeartbeats(ctx, &realTimer{})
 		}()
 		go func() {
 			defer s.wg.Done()
+			ctx, cancel := s.stopCh.NewCtx()
+			defer cancel()
+			ticker := services.NewTicker(s.pollPeriod)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					s.runFeeder()
-				case <-s.parentCtx.Done():
+					s.runFeeder(ctx)
+				case <-ctx.Done():
 					return
 				}
 			}
@@ -253,15 +260,15 @@ func (s *service) Start(context.Context) error {
 func (s *service) Close() error {
 	return s.StopOnce("BHS Feeder Service", func() error {
 		s.logger.Infow("Stopping BHS feeder")
-		s.cancel()
+		close(s.stopCh)
 		s.wg.Wait()
 		return nil
 	})
 }
 
-func (s *service) runFeeder() {
+func (s *service) runFeeder(ctx context.Context) {
 	s.logger.Debugw("Running BHS feeder")
-	ctx, cancel := context.WithTimeout(s.parentCtx, s.runTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.runTimeout)
 	defer cancel()
 	err := s.feeder.Run(ctx)
 	if err == nil {

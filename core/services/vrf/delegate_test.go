@@ -16,19 +16,20 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox/mailboxtest"
+	"github.com/smartcontractkit/chainlink-evm/pkg/keys"
 
+	"github.com/smartcontractkit/chainlink-evm/pkg/assets"
+	"github.com/smartcontractkit/chainlink-evm/pkg/client/clienttest"
+	"github.com/smartcontractkit/chainlink-evm/pkg/heads"
+	evmtypes "github.com/smartcontractkit/chainlink-evm/pkg/types"
+	evmutils "github.com/smartcontractkit/chainlink-evm/pkg/utils"
+
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/generated/solidity_vrf_coordinator_interface"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains/legacyevm"
+	"github.com/smartcontractkit/chainlink-evm/pkg/log"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	log_mocks "github.com/smartcontractkit/chainlink/v2/common/log/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
-	evmclimocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/headtracker"
-	httypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/headtracker/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/log"
-	log_mocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/log/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	evmutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/solidity_vrf_coordinator_interface"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest"
@@ -40,7 +41,6 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/vrfkey"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
-	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 	"github.com/smartcontractkit/chainlink/v2/core/services/signatures/secp256k1"
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf"
 	vrf_mocks "github.com/smartcontractkit/chainlink/v2/core/services/vrf/mocks"
@@ -56,12 +56,12 @@ type vrfUniverse struct {
 	pr           pipeline.Runner
 	prm          pipeline.ORM
 	lb           *log_mocks.Broadcaster
-	ec           *evmclimocks.Client
+	ec           *clienttest.Client
 	ks           keystore.Master
 	vrfkey       vrfkey.KeyV2
 	submitter    common.Address
 	txm          *txmgr.TxManager
-	hb           httypes.HeadBroadcaster
+	hb           heads.Broadcaster
 	legacyChains legacyevm.LegacyChainContainer
 	cid          big.Int
 }
@@ -72,24 +72,34 @@ func buildVrfUni(t *testing.T, db *sqlx.DB, cfg chainlink.GeneralConfig) vrfUniv
 	lb := log_mocks.NewBroadcaster(t)
 	lb.On("AddDependents", 1).Maybe()
 	lb.On("Register", mock.Anything, mock.Anything).Return(func() {}).Maybe()
-	ec := evmclimocks.NewClient(t)
+	ec := clienttest.NewClient(t)
 	ec.On("ConfiguredChainID").Return(testutils.FixtureChainID)
 	ec.On("LatestBlockHeight", mock.Anything).Return(big.NewInt(51), nil).Maybe()
 	lggr := logger.TestLogger(t)
-	hb := headtracker.NewHeadBroadcaster(lggr)
+	hb := heads.NewBroadcaster(lggr)
 
 	// Don't mock db interactions
 	prm := pipeline.NewORM(db, lggr, cfg.JobPipeline().MaxSuccessfulRuns())
 	btORM := bridges.NewORM(db)
 	ks := keystore.NewInMemory(db, utils.FastScryptParams, lggr)
 	_, dbConfig, evmConfig := txmgr.MakeTestConfigs(t)
-	txm, err := txmgr.NewTxm(db, evmConfig, evmConfig.GasEstimator(), evmConfig.Transactions(), nil, dbConfig, dbConfig.Listener(), ec, logger.TestLogger(t), nil, ks.Eth(), nil)
-	orm := headtracker.NewORM(*testutils.FixtureChainID, db)
+	evmKs := keys.NewChainStore(keystore.NewEthSigner(ks.Eth(), ec.ConfiguredChainID()), ec.ConfiguredChainID())
+	txm, err := txmgr.NewTxm(db, evmConfig, evmConfig.GasEstimator(), evmConfig.Transactions(), nil, dbConfig, dbConfig.Listener(), ec, logger.TestLogger(t), nil, evmKs, nil, nil, nil)
+	orm := heads.NewORM(*testutils.FixtureChainID, db)
 	require.NoError(t, orm.IdempotentInsertHead(testutils.Context(t), cltest.Head(51)))
 	jrm := job.NewORM(db, prm, btORM, ks, lggr)
 	t.Cleanup(func() { assert.NoError(t, jrm.Close()) })
-	relayExtenders := evmtest.NewChainRelayExtenders(t, evmtest.TestChainOpts{LogBroadcaster: lb, KeyStore: ks.Eth(), Client: ec, DB: db, GeneralConfig: cfg, TxManager: txm})
-	legacyChains := evmrelay.NewLegacyChainsFromRelayerExtenders(relayExtenders)
+	legacyChains := evmtest.NewLegacyChains(t, evmtest.TestChainOpts{
+		LogBroadcaster: lb,
+		Client:         ec,
+		DB:             db,
+		ChainConfigs:   cfg.EVMConfigs(),
+		DatabaseConfig: cfg.Database(),
+		FeatureConfig:  cfg.Feature(),
+		ListenerConfig: cfg.Database().Listener(),
+		TxManager:      txm,
+		KeyStore:       ks.Eth(),
+	})
 	pr := pipeline.NewRunner(prm, btORM, cfg.JobPipeline(), cfg.WebServer(), legacyChains, ks.Eth(), ks.VRF(), lggr, nil, nil)
 	require.NoError(t, ks.Unlock(ctx, testutils.Password))
 	k, err2 := ks.Eth().Create(testutils.Context(t), testutils.FixtureChainID)
@@ -225,7 +235,7 @@ func TestDelegate_ReorgAttackProtection(t *testing.T) {
 	// Wait until the log is present
 	waitForChannel(t, added, time.Second, "request not added to the queue")
 	reqs := listener.ReqsConfirmedAt()
-	if assert.Equal(t, 1, len(reqs)) {
+	if assert.Len(t, reqs, 1) {
 		// It should be confirmed at 10+6*(2^2)
 		assert.Equal(t, uint64(34), reqs[0])
 	}
@@ -323,7 +333,7 @@ func TestDelegate_ValidLog(t *testing.T) {
 		waitForChannel(t, runComplete, 2*time.Second, "pipeline not complete")
 		runs, err := vuni.prm.GetAllRuns(ctx)
 		require.NoError(t, err)
-		require.Equal(t, i+1, len(runs))
+		require.Len(t, runs, i+1)
 		assert.False(t, runs[0].FatalErrors.HasError())
 		// Should have 4 tasks all completed
 		assert.Len(t, runs[0].PipelineTaskRuns, 4)
@@ -336,7 +346,7 @@ func TestDelegate_ValidLog(t *testing.T) {
 		}).Return(nil).Once()
 		// If we send a completed log we should the respCount increase
 		var reqIDBytes []byte
-		copy(reqIDBytes[:], tc.reqID[:])
+		copy(reqIDBytes, tc.reqID[:])
 		listener.HandleLog(ctx, log.NewLogBroadcast(types.Log{
 			// Data has all the NON-indexed parameters
 			Data: bytes.Join([][]byte{reqIDBytes, // output
@@ -398,7 +408,7 @@ func TestDelegate_InvalidLog(t *testing.T) {
 	// Should create a run that errors in the vrf task
 	runs, err := vuni.prm.GetAllRuns(ctx)
 	require.NoError(t, err)
-	require.Equal(t, len(runs), 1)
+	require.Len(t, runs, 1)
 	for _, tr := range runs[0].PipelineTaskRuns {
 		if tr.Type == pipeline.TaskTypeVRF {
 			assert.Contains(t, tr.Error.String, "invalid key hash")
@@ -414,7 +424,7 @@ func TestDelegate_InvalidLog(t *testing.T) {
 
 	txes, err := txStore.GetAllTxes(testutils.Context(t))
 	require.NoError(t, err)
-	require.Len(t, txes, 0)
+	require.Empty(t, txes)
 }
 
 func TestFulfilledCheck(t *testing.T) {
@@ -462,7 +472,7 @@ func TestFulfilledCheck(t *testing.T) {
 	// Should consume the log with no run
 	runs, err := vuni.prm.GetAllRuns(ctx)
 	require.NoError(t, err)
-	require.Equal(t, len(runs), 0)
+	require.Empty(t, runs)
 }
 
 func Test_CheckFromAddressMaxGasPrices(t *testing.T) {
@@ -691,8 +701,10 @@ func Test_VRFV2PlusServiceFailsWhenVRFOwnerProvided(t *testing.T) {
 		vuni.legacyChains,
 		logger.TestLogger(t),
 		mailMon)
-	chain, err := vuni.legacyChains.Get(testutils.FixtureChainID.String())
+	chainService, err := vuni.legacyChains.Get(testutils.FixtureChainID.String())
 	require.NoError(t, err)
+	chain, ok := chainService.(legacyevm.Chain)
+	require.True(t, ok)
 	vs := testspecs.GenerateVRFSpec(testspecs.VRFSpecParams{
 		VRFVersion:    vrfcommon.V2Plus,
 		PublicKey:     vuni.vrfkey.PublicKey.String(),

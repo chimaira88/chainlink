@@ -13,21 +13,22 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/loop"
 	commontypes "github.com/smartcontractkit/chainlink-common/pkg/types"
-	"github.com/smartcontractkit/chainlink/v2/core/chains"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	evmtxmgrmocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr/mocks"
-	evmutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
-
-	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
+	"github.com/smartcontractkit/chainlink-evm/pkg/chains"
+	"github.com/smartcontractkit/chainlink-evm/pkg/config/toml"
+	"github.com/smartcontractkit/chainlink-evm/pkg/txmgr"
+	evmutils "github.com/smartcontractkit/chainlink-evm/pkg/utils"
+	ubig "github.com/smartcontractkit/chainlink-evm/pkg/utils/big"
+	evmtxmgrmocks "github.com/smartcontractkit/chainlink/v2/common/txmgr/mocks"
 	coremocks "github.com/smartcontractkit/chainlink/v2/core/internal/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	chainlinkmocks "github.com/smartcontractkit/chainlink/v2/core/services/chainlink/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/services/feeds"
 	feedsMocks "github.com/smartcontractkit/chainlink/v2/core/services/feeds/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	jobORMMocks "github.com/smartcontractkit/chainlink/v2/core/services/job/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay"
 	testutils2 "github.com/smartcontractkit/chainlink/v2/core/web/testutils"
 )
 
@@ -46,12 +47,18 @@ func TestLoader_Chains(t *testing.T) {
 	config2, err := chain2.TOMLString()
 	require.NoError(t, err)
 
-	app.On("GetRelayers").Return(&chainlinkmocks.FakeRelayerChainInteroperators{Relayers: []loop.Relayer{
-		testutils2.MockRelayer{ChainStatus: commontypes.ChainStatus{
+	app.On("GetRelayers").Return(&chainlinkmocks.FakeRelayerChainInteroperators{Relayers: map[commontypes.RelayID]loop.Relayer{
+		commontypes.RelayID{
+			Network: relay.NetworkEVM,
+			ChainID: "1",
+		}: testutils2.MockRelayer{ChainStatus: commontypes.ChainStatus{
 			ID:      "1",
 			Enabled: true,
 			Config:  config1,
-		}}, testutils2.MockRelayer{ChainStatus: commontypes.ChainStatus{
+		}}, commontypes.RelayID{
+			Network: relay.NetworkEVM,
+			ChainID: "2",
+		}: testutils2.MockRelayer{ChainStatus: commontypes.ChainStatus{
 			ID:      "2",
 			Enabled: true,
 			Config:  config2,
@@ -65,14 +72,93 @@ func TestLoader_Chains(t *testing.T) {
 	assert.Len(t, results, 3)
 
 	require.NoError(t, err)
-	want2 := commontypes.ChainStatus{ID: "2", Enabled: true, Config: config2}
-	assert.Equal(t, want2, results[0].Data.(commontypes.ChainStatus))
+	want2 := chainlink.NetworkChainStatus{
+		ChainStatus: commontypes.ChainStatus{ID: "2", Enabled: true, Config: config2},
+		Network:     relay.NetworkEVM,
+	}
+	assert.Equal(t, want2, results[0].Data.(chainlink.NetworkChainStatus))
 
-	want1 := commontypes.ChainStatus{ID: "1", Enabled: true, Config: config1}
-	assert.Equal(t, want1, results[1].Data.(commontypes.ChainStatus))
+	want1 := chainlink.NetworkChainStatus{
+		ChainStatus: commontypes.ChainStatus{ID: "1", Enabled: true, Config: config1},
+		Network:     relay.NetworkEVM,
+	}
+	assert.Equal(t, want1, results[1].Data.(chainlink.NetworkChainStatus))
 	assert.Nil(t, results[2].Data)
 	assert.Error(t, results[2].Error)
 	assert.ErrorIs(t, results[2].Error, chains.ErrNotFound)
+}
+
+func TestLoader_ChainsRelayID_HandleDuplicateIDAcrossNetworks(t *testing.T) {
+	t.Parallel()
+
+	app := coremocks.NewApplication(t)
+	ctx := InjectDataloader(testutils.Context(t), app)
+
+	one := ubig.NewI(1)
+	chain := toml.EVMConfig{ChainID: one, Chain: toml.Defaults(one)}
+	two := ubig.NewI(2)
+	chain2 := toml.EVMConfig{ChainID: two, Chain: toml.Defaults(two)}
+	config1, err := chain.TOMLString()
+	require.NoError(t, err)
+	config2, err := chain2.TOMLString()
+	require.NoError(t, err)
+
+	evm1 := commontypes.RelayID{
+		Network: relay.NetworkEVM,
+		ChainID: "1",
+	}
+	evm2 := commontypes.RelayID{
+		Network: relay.NetworkEVM,
+		ChainID: "2",
+	}
+	// check if can handle same chain ID but different network
+	solana1 := commontypes.RelayID{
+		Network: relay.NetworkSolana,
+		ChainID: "1",
+	}
+	app.On("GetRelayers").Return(&chainlinkmocks.FakeRelayerChainInteroperators{Relayers: map[commontypes.RelayID]loop.Relayer{
+		evm1: testutils2.MockRelayer{ChainStatus: commontypes.ChainStatus{
+			ID:      "1",
+			Enabled: true,
+			Config:  config1,
+		}},
+		evm2: testutils2.MockRelayer{ChainStatus: commontypes.ChainStatus{
+			ID:      "2",
+			Enabled: true,
+			Config:  config2,
+		}},
+		solana1: testutils2.MockRelayer{ChainStatus: commontypes.ChainStatus{
+			ID:      "1",
+			Enabled: true,
+			Config:  "config",
+		}},
+	}})
+
+	evm3 := commontypes.RelayID{
+		Network: relay.NetworkEVM,
+		ChainID: "3",
+	}
+
+	batcher := chainBatcher{app}
+	keys := dataloader.NewKeysFromStrings([]string{evm2.String(), evm1.String(), evm3.String()})
+	results := batcher.loadByRelayIDs(ctx, keys)
+
+	assert.Len(t, results, 3)
+
+	require.NoError(t, err)
+
+	assert.Equal(t, chainlink.NetworkChainStatus{
+		ChainStatus: commontypes.ChainStatus{ID: "2", Enabled: true, Config: config2},
+		Network:     evm2.Network,
+	}, results[0].Data.(chainlink.NetworkChainStatus))
+
+	assert.Equal(t, chainlink.NetworkChainStatus{
+		ChainStatus: commontypes.ChainStatus{ID: "1", Enabled: true, Config: config1},
+		Network:     evm1.Network,
+	}, results[1].Data.(chainlink.NetworkChainStatus))
+	assert.Nil(t, results[2].Data)
+	require.Error(t, results[2].Error)
+	require.ErrorIs(t, results[2].Error, chains.ErrNotFound)
 }
 
 func TestLoader_Nodes(t *testing.T) {
